@@ -1,6 +1,7 @@
 import sys
 import os
 import numpy as np
+import math
 
 try:
     import gymnasium as gym
@@ -46,7 +47,6 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
 
         # We manually structure the initial observation state
         x, x_dot, theta, theta_dot = self.env.unwrapped.state
-        import math
 
         # Pad obs
         padded_obs = np.zeros(config.o_dim, dtype=np.float64)
@@ -79,8 +79,6 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
 
         # Bounded Wall Physics (Continuous Non-Resetting Domain)
         x, x_dot, theta, theta_dot = self.env.unwrapped.state
-
-        import math
 
         # Add physical walls at the edges of the track (-2.0 and +2.0)
         # If the cart hits the wall, mathematically bounce it back by reversing its velocity
@@ -128,7 +126,6 @@ def run_cartpole_boreal():
 
     raw_env = gym.make("CartPole-v1")
     # Disable Gymnasium internal termination bounds for infinite physics
-    import math
 
     raw_env.unwrapped.theta_threshold_radians = 100 * math.pi
     raw_env.unwrapped.x_threshold = 10000.0
@@ -168,7 +165,7 @@ def run_cartpole_boreal():
             if recovery_mode:
                 active_lr = config.recov_lr_shift
                 exp_shift = 2
-                a_q = ALU_Q16.to_q([0.0, 0.0])
+                a_q = ALU_Q16.to_q([0.0])
                 recovery_timer -= 1
             else:
                 active_lr = config.base_lr_shift
@@ -224,6 +221,8 @@ def run_cartpole_boreal():
                     for _ in range(config.n_cores)
                 ]
                 break
+        else:
+            logger.log["ep_lens"].append(500)
 
     print("Done. Rendering...")
     try:
