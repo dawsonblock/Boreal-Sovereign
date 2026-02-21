@@ -1,4 +1,4 @@
- ============================================================================
+// ============================================================================
 // BOREAL APEX: SOVEREIGN AIPU - FULL PRODUCTION BUILD (v1.2)
 // ============================================================================
 // Features: 
@@ -8,6 +8,20 @@
 // - Hebbian Learning Reflex (Decay + Outer Product)
 // - D-Shot 600 Digital Motor Protocol with 500ms Watchdog
 // ============================================================================
+
+package boreal_math_pkg;
+    localparam int QW       = 32;
+    localparam int FRAC_W   = 16;
+    localparam logic signed [QW-1:0] Q_MAX = 32'sh7FFFFFFF;
+    localparam logic signed [QW-1:0] Q_MIN = -32'sh80000000;
+
+    function automatic logic signed [QW-1:0] qsat(input logic signed [47:0] v);
+        if (v > Q_MAX) return Q_MAX;
+        else if (v < Q_MIN) return Q_MIN;
+        else return v[31:0];
+    endfunction
+endpackage
+
 
 module boreal_apex_core_full #(
     parameter int S_DIM   = 12,
@@ -33,19 +47,25 @@ module boreal_apex_core_full #(
     output logic emergency_disarm_led
 );
 
+    import boreal_math_pkg::*;
+
     // --- Interconnects ---
     logic signed [DATA_W-1:0] sensor_obs[O_DIM];
+    logic signed [DATA_W-1:0] sensor_obs_clamped[O_DIM];
     logic signed [DATA_W-1:0] state_curr_r[S_DIM];
     logic signed [DATA_W-1:0] state_next[S_DIM];
     logic signed [DATA_W-1:0] obs_pred[O_DIM];
     logic signed [DATA_W-1:0] actions_r[A_DIM];
     logic signed [DATA_W-1:0] error_q[O_DIM];
+    logic signed [DATA_W-1:0] weighted_error[O_DIM];
     
     logic obs_ready, tick_done, updater_ready, first_tick_done;
     logic tick_done_d1, updater_ready_d1;
     
     // Watchdog Signals
     logic [24:0] watchdog_cnt; 
+    logic [24:0] sensor_timeout;
+    logic [24:0] tick_timeout;
     logic        emergency_disarm;
 
     wire tick_pulse   = tick_done && !tick_done_d1;
@@ -55,37 +75,93 @@ module boreal_apex_core_full #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             watchdog_cnt <= 0;
+            sensor_timeout <= 0;
+            tick_timeout <= 0;
             emergency_disarm <= 1'b0;
             emergency_disarm_led <= 1'b0;
         end else begin
-            if (!updater_ready && first_tick_done) begin
-                if (watchdog_cnt < 25000000) 
-                    watchdog_cnt <= watchdog_cnt + 1;
-                else begin
+            if (emergency_disarm) begin
+                emergency_disarm <= 1'b1; // Sticky disarm
+                emergency_disarm_led <= 1'b1;
+            end else begin
+                if (!updater_ready && first_tick_done) watchdog_cnt <= watchdog_cnt + 1;
+                else watchdog_cnt <= 0;
+                
+                if (!obs_ready && first_tick_done) sensor_timeout <= sensor_timeout + 1;
+                else sensor_timeout <= 0;
+
+                if (!tick_done && first_tick_done) tick_timeout <= tick_timeout + 1;
+                else tick_timeout <= 0;
+
+                if (watchdog_cnt > 25000000 || sensor_timeout > 25000000 || tick_timeout > 25000000) begin
                     emergency_disarm <= 1'b1;
                     emergency_disarm_led <= 1'b1;
                 end
-            end else begin
-                watchdog_cnt <= 0; 
+                
+                for (int a=0; a<A_DIM; a++) begin
+                    if (actions_r[a] == Q_MAX || actions_r[a] == Q_MIN) begin
+                        emergency_disarm <= 1'b1;
+                        emergency_disarm_led <= 1'b1;
+                    end
+                end
             end
         end
     end
 
     // --- 2. Action Selection & State Latching ---
+    localparam signed [31:0] ACT_MAX = 32'sh00018000;
+    localparam signed [31:0] ACT_MIN = -32'sh00018000;
+    localparam signed [31:0] SLEW    = 32'sh00008000;
+    localparam signed [31:0] LAMBDA  = 32'sh00000800;
+
+    logic signed [31:0] actions_prev[A_DIM];
+    logic signed [31:0] precision[O_DIM];
+    logic signed [31:0] K_e [A_DIM][O_DIM];
+    logic signed [31:0] K_x [A_DIM][S_DIM];
+
+    initial begin
+        for(int o=0; o<O_DIM; o++) precision[o] = 32'h00010000;
+        for(int a=0; a<A_DIM; a++) begin
+            for(int o=0; o<O_DIM; o++) K_e[a][o] = (a==0 && o==0) ? 32'h00010000 : ((a==1 && o==0) ? -32'h00010000 : 0);
+            for(int s=0; s<S_DIM; s++) K_x[a][s] = 0;
+        end
+    end
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             tick_done_d1 <= 0; updater_ready_d1 <= 0; first_tick_done <= 0;
-            for(int i=0; i<A_DIM; i++) actions_r[i] <= '0;
+            for(int i=0; i<A_DIM; i++) begin actions_r[i] <= '0; actions_prev[i] <= '0; end
             for(int i=0; i<S_DIM; i++) state_curr_r[i] <= '0;
         end else begin
             tick_done_d1 <= tick_done;
             updater_ready_d1 <= updater_ready;
 
             if (tick_pulse) begin
-                // Reflexive Policy (Direct Proportional Surprise Minimization)
-                actions_r[0] <=  error_q[0];
-                actions_r[1] <= -error_q[0];
-                state_curr_r <= state_next;
+                logic signed [47:0] acc;
+                logic signed [31:0] raw, clamped, delta, limited;
+
+                for (int a=0; a<A_DIM; a++) begin
+                    acc = 0;
+                    for (int o=0; o<O_DIM; o++) acc += 48'(weighted_error[o]) * 48'(K_e[a][o]);
+                    for (int s=0; s<S_DIM; s++) acc -= 48'(state_curr_r[s]) * 48'(K_x[a][s]);
+                    acc -= 48'(actions_prev[a]) * 48'(LAMBDA);
+
+                    raw = acc >>> FRAC_W;
+                    clamped = qsat(48'(raw));
+                    delta = clamped - actions_prev[a];
+                    
+                    if (delta > SLEW) delta = SLEW;
+                    else if (delta < -SLEW) delta = -SLEW;
+                    
+                    limited = actions_prev[a] + delta;
+                    if (limited > ACT_MAX) limited = ACT_MAX;
+                    else if (limited < ACT_MIN) limited = ACT_MIN;
+                    
+                    actions_r[a] <= limited;
+                    actions_prev[a] <= limited;
+                end
+
+                for(int i=0; i<S_DIM; i++) state_curr_r[i] <= state_next[i];
                 first_tick_done <= 1'b1;
             end
         end
@@ -96,19 +172,28 @@ module boreal_apex_core_full #(
     // --- 3. Submodule Integration ---
 
     // Sensory Brainstem: Autonomous IMU Polling
-    boreal_spi_dma #(O_DIM, DATA_W) brainstem (.*);
-
-    // Predictive Cerebellum: Sequential Matrix Math
-    boreal_predictive_tile #(S_DIM, O_DIM, A_DIM, DATA_W, FRAC_W) cerebellum (
-        .clk, .rst_n, .start_tick(obs_ready),
-        .state_in(state_curr_r), .act_in(actions_r),
-        .state_out(state_next), .obs_pred(obs_pred), .tick_done
+    boreal_spi_dma #(O_DIM, DATA_W) brainstem (
+        .clk, .rst_n, .spi_sck, .spi_mosi, .spi_cs, 
+        .spi_miso, .sensor_obs(sensor_obs), .obs_valid(obs_ready)
     );
 
-    // Learning Reflex Arc: Hebbian BRAM Update
-    boreal_hebbian_updater #(S_DIM, O_DIM, DATA_W, FRAC_W) learning_engine (
+    logic [9:0] w_addr_b;
+    logic signed [DATA_W-1:0] w_dout_b, w_din_b;
+    logic w_we_b;
+
+    // Predictive Cerebellum: Parallel Block-Matrix DSP
+    boreal_block_dsp_tile #(S_DIM, O_DIM, A_DIM, DATA_W, FRAC_W) cerebellum (
+        .clk, .rst_n, .start_tick(obs_ready),
+        .state_in(state_curr_r), .act_in(actions_r),
+        .state_out(state_next), .obs_pred(obs_pred), .tick_done,
+        .w_addr_b, .w_dout_b, .w_din_b, .w_we_b
+    );
+
+    // Learning Reflex Arc: Bounded Gradient Descent Update
+    boreal_bgd_updater #(S_DIM, O_DIM, A_DIM, DATA_W, FRAC_W) learning_engine (
         .clk, .rst_n, .update_start(tick_pulse && updater_ready),
-        .error_q(error_q), .state_q(state_curr_r), .ready(updater_ready)
+        .error_q(error_q), .state_q(state_curr_r), .ready(updater_ready),
+        .w_addr_b, .w_dout_b, .w_din_b, .w_we_b
     );
 
     // Digital Efferents (D-Shot 600)
@@ -125,9 +210,29 @@ module boreal_apex_core_full #(
     );
 
     // Surprise Calculation: reality - belief
-    always_comb begin
-        for(int i=0; i<O_DIM; i++) error_q[i] = sensor_obs[i] - obs_pred[i];
+    always @* begin
+        for(int i=0; i<O_DIM; i++) begin
+            sensor_obs_clamped[i] = qsat(48'(sensor_obs[i]));
+            error_q[i] = qsat(48'(sensor_obs_clamped[i]) - 48'(obs_pred[i]));
+            weighted_error[i] = (48'(error_q[i]) * 48'(precision[i])) >>> FRAC_W;
+        end
     end
+    
+    // --- 4. Formal Safety Assertions ---
+    // synthesis translate_off
+    `ifndef SYNTHESIS
+    always_ff @(posedge clk) begin
+        if (rst_n) begin
+            // Formal bounds for SymbiYosys engine
+            // (Complex SVA properties omitted for iverilog compatibility)
+            if (watchdog_cnt > 25000000) begin
+                $display("AIPU SAFETY FAULT: Watchdog timeout exceeded!");
+                $stop;
+            end
+        end
+    end
+    `endif
+    // synthesis translate_on
 
 endmodule
 
@@ -139,20 +244,22 @@ module boreal_bram #(parameter int ADDR_W=10, parameter int DATA_W=32) (
     input  logic [ADDR_W-1:0] addr_a,
     output logic signed [DATA_W-1:0] dout_a,
     input  logic [ADDR_W-1:0] addr_b,
+    output logic signed [DATA_W-1:0] dout_b,
     input  logic signed [DATA_W-1:0] din_b,
     input  logic we_b
 );
     logic signed [DATA_W-1:0] mem [(2**ADDR_W)-1:0];
     always_ff @(posedge clk) begin
         dout_a <= mem[addr_a];
+        dout_b <= mem[addr_b];
         if (we_b) mem[addr_b] <= din_b;
     end
 endmodule
 
 // ============================================================================
-// SUBMODULE: PREDICTIVE TILE (SEQUENTIAL)
+// SUBMODULE: BLOCK-MATRIX DSP TILE (PARALLEL)
 // ============================================================================
-module boreal_predictive_tile #(
+module boreal_block_dsp_tile #(
     parameter int S_DIM, O_DIM, A_DIM, DATA_W, FRAC_W
 )(
     input  logic clk, rst_n, start_tick,
@@ -160,47 +267,115 @@ module boreal_predictive_tile #(
     input  logic signed [DATA_W-1:0] act_in   [A_DIM],
     output logic signed [DATA_W-1:0] state_out[S_DIM],
     output logic signed [DATA_W-1:0] obs_pred [O_DIM],
-    output logic tick_done
+    output logic tick_done,
+    
+    // Weight Read/Write Port (from Updater)
+    input  logic [9:0] w_addr_b,
+    output logic signed [DATA_W-1:0] w_dout_b,
+    input  logic signed [DATA_W-1:0] w_din_b,
+    input  logic w_we_b
 );
+    import boreal_math_pkg::*;
+    localparam int TOTAL_W = (S_DIM * S_DIM) + (S_DIM * A_DIM) + (O_DIM * S_DIM);
+
+    // Flattened register bank for parallel random access
+    logic signed [DATA_W-1:0] weight_reg [TOTAL_W];
+
+    // Read/Write access for the Updater (Port B)
+    always_ff @(posedge clk) begin
+        if (w_addr_b < TOTAL_W) begin
+            w_dout_b <= weight_reg[w_addr_b];
+            if (w_we_b) weight_reg[w_addr_b] <= w_din_b;
+        end else begin
+            w_dout_b <= 0;
+        end
+    end
+
     typedef enum logic [2:0] {IDLE, COMP_S, COMP_A, COMP_C, FINISH} state_t;
     state_t fsm;
 
-    logic [7:0] r, c;
-    logic signed [63:0] accum;
-    
-    // Address logic for weight BRAM
-    logic [9:0] w_addr;
-    logic signed [DATA_W-1:0] w_val;
-    
-    boreal_bram #(10, 32) weight_mem (
-        .clk, .addr_a(w_addr), .dout_a(w_val), 
-        .addr_b(10'd0), .din_b(32'd0), .we_b(1'b0)
-    );
+    logic [7:0] r;
+    logic signed [47:0] sum;
+    logic signed [47:0] a_sum;
+
+    // Parallel Multiplier Arrays (DSP mapped)
+    logic signed [63:0] s_prod [S_DIM];
+    logic signed [63:0] a_prod [A_DIM];
+
+    always @* begin
+        sum = 0;
+        for (int i=0; i<S_DIM; i++) begin
+            if (fsm == COMP_S)
+                s_prod[i] = 64'(weight_reg[(r*S_DIM) + i]) * 64'(state_in[i]);
+            else if (fsm == COMP_C)
+                s_prod[i] = 64'(weight_reg[(S_DIM*S_DIM) + (S_DIM*A_DIM) + (r*S_DIM) + i]) * 64'(state_out[i]);
+            else
+                s_prod[i] = 0;
+            sum += s_prod[i] >>> FRAC_W;
+        end
+        
+        a_sum = 0;
+        for (int i=0; i<A_DIM; i++) begin
+            if (fsm == COMP_A)
+                a_prod[i] = 64'(weight_reg[(S_DIM*S_DIM) + (r*A_DIM) + i]) * 64'(act_in[i]);
+            else
+                a_prod[i] = 0;
+            a_sum += a_prod[i] >>> FRAC_W;
+        end
+    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            fsm <= IDLE; tick_done <= 0; r <= 0; c <= 0; accum <= 0;
+            fsm <= IDLE; tick_done <= 0; r <= 0;
+            for(int i=0; i<S_DIM; i++) state_out[i] <= 0;
+            for(int i=0; i<O_DIM; i++) obs_pred[i] <= 0;
+            // Initialize default weights. Ws is shifted down by 2 to prevent initialization spectral instability.
+            for(int i=0; i<TOTAL_W; i++) begin
+                if (i < S_DIM * S_DIM)
+                    weight_reg[i] <= ($signed((i * 32'd1664525) % 16384) - 8192) >>> 2;
+                else
+                    weight_reg[i] <= $signed((i * 32'd1664525) % 16384) - 8192;
+            end
+            // Overlay Identity matrix on critical path logic mapping
+            for(int i=0; i<S_DIM; i++) weight_reg[(i*S_DIM)+i] <= 32'sd58982; // Leaky Integrator Ws (0.9 in Q16.16)
         end else begin
             tick_done <= 0;
             case (fsm)
-                IDLE: if (start_tick) begin fsm <= COMP_S; r <= 0; c <= 0; accum <= 0; end
-                
-                COMP_S: begin
-                    accum <= accum + (64'(w_val) * 64'(state_in[c]));
-                    w_addr <= (r * S_DIM) + c;
-                    if (c == S_DIM-1) begin
-                        state_out[r] <= (accum + (1<<(FRAC_W-1))) >>> FRAC_W;
-                        c <= 0;
-                        if (r == S_DIM-1) begin fsm <= COMP_A; r <= 0; end else r <= r + 1;
-                        accum <= 0;
-                    end else c <= c + 1;
+                IDLE: begin
+                    if (start_tick) begin
+                        fsm <= COMP_S;
+                        r <= 0;
+                    end
                 end
-                
-                COMP_A: fsm <= COMP_C; // Implementation similar to COMP_S
-                
+
+                COMP_S: begin
+                    // Add FRAC_W/2 for rounding
+                    state_out[r] <= qsat(sum + (1<<(FRAC_W-1)));
+                    if (r == S_DIM-1) begin
+                        fsm <= COMP_A;
+                        r <= 0;
+                    end else begin
+                        r <= r + 1;
+                    end
+                end
+
+                COMP_A: begin
+                    state_out[r] <= qsat(48'(state_out[r]) + a_sum + (1<<(FRAC_W-1)));
+                    if (r == S_DIM-1) begin
+                        fsm <= COMP_C;
+                        r <= 0;
+                    end else begin
+                        r <= r + 1;
+                    end
+                end
+
                 COMP_C: begin
-                    obs_pred[r] <= (accum + (1<<(FRAC_W-1))) >>> FRAC_W;
-                    if (r == O_DIM-1) fsm <= FINISH; else r <= r + 1;
+                    obs_pred[r] <= qsat(sum + (1<<(FRAC_W-1)));
+                    if (r == O_DIM-1) begin
+                        fsm <= FINISH;
+                    end else begin
+                        r <= r + 1;
+                    end
                 end
 
                 FINISH: begin tick_done <= 1; fsm <= IDLE; end
@@ -210,24 +385,89 @@ module boreal_predictive_tile #(
 endmodule
 
 // ============================================================================
-// SUBMODULE: HEBBIAN UPDATER
+// SUBMODULE: BOUNDED GRADIENT DESCENT UPDATER
 // ============================================================================
-module boreal_hebbian_updater #(parameter int S_DIM, O_DIM, DATA_W, FRAC_W)(
+module boreal_bgd_updater #(parameter int S_DIM, O_DIM, A_DIM, DATA_W, FRAC_W)(
     input  logic clk, rst_n, update_start,
     input  logic signed [DATA_W-1:0] error_q[O_DIM],
     input  logic signed [DATA_W-1:0] state_q[S_DIM],
-    output logic ready
+    output logic ready,
+    output logic [9:0] w_addr_b,
+    input  logic signed [DATA_W-1:0] w_dout_b,
+    output logic signed [DATA_W-1:0] w_din_b,
+    output logic w_we_b
 );
+    import boreal_math_pkg::*;
+    
+    localparam signed [31:0] ETA      = 32'h00000800; // Learning rate (Q16.16)
+    localparam signed [31:0] LAMBDA_W = 32'h00000100; // Weight decay (Q16.16)
+    localparam int W_O_OFFSET = (S_DIM * S_DIM) + (S_DIM * A_DIM);
+
+    typedef enum logic [1:0] {IDLE, READ, CALC, WRITE} cmd_state_t;
+    cmd_state_t fsm;
+
     logic [7:0] r, c;
+    
+    logic signed [63:0] err_st_prod;
+    logic signed [47:0] grad;
+    logic signed [63:0] grad_eta_prod;
+    logic signed [47:0] grad_eta;
+    logic signed [63:0] decay_prod;
+    logic signed [47:0] decay;
+    logic signed [47:0] w_new;
+
+    always_comb begin
+        err_st_prod   = 64'(error_q[r]) * 64'(state_q[c]);
+        grad          = err_st_prod >>> FRAC_W;
+        grad_eta_prod = 64'(grad) * 64'(ETA);
+        grad_eta      = grad_eta_prod >>> FRAC_W;
+        decay_prod    = 64'(w_dout_b) * 64'(LAMBDA_W);
+        decay         = decay_prod >>> FRAC_W;
+        w_new         = 48'(w_dout_b) - decay + grad_eta;
+    end
+    
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin ready <= 1; r <= 0; c <= 0; end
-        else if (update_start && ready) begin ready <= 0; r <= 0; c <= 0; end
-        else if (!ready) begin
-            // Simplified Hebbian: W = W_old + eta * (error * state)
-            if (c == S_DIM-1) begin
-                c <= 0;
-                if (r == O_DIM-1) begin r <= 0; ready <= 1; end else r <= r + 1;
-            end else c <= c + 1;
+        if (!rst_n) begin 
+            ready <= 1; r <= 0; c <= 0; fsm <= IDLE; w_we_b <= 0;
+            w_addr_b <= 0;
+            w_din_b <= 0;
+        end else begin
+            case (fsm)
+                IDLE: begin
+                    w_we_b <= 0;
+                    if (update_start && ready) begin 
+                        ready <= 0; r <= 0; c <= 0; 
+                        w_addr_b <= 10'(W_O_OFFSET); 
+                        fsm <= READ; 
+                    end
+                end
+                READ: begin
+                    w_we_b <= 0;
+                    fsm <= CALC;
+                end
+                CALC: begin
+                    w_din_b <= qsat(w_new);
+                    w_we_b  <= 1'b1;
+                    fsm <= WRITE;
+                end
+                WRITE: begin
+                    w_we_b <= 0;
+                    if (c == S_DIM-1) begin
+                        c <= 0;
+                        if (r == O_DIM-1) begin 
+                            fsm <= IDLE; ready <= 1; 
+                        end else begin 
+                            r <= r + 1; 
+                            w_addr_b <= 10'(W_O_OFFSET) + 10'(((r + 1) * S_DIM));
+                            fsm <= READ; 
+                        end
+                    end else begin 
+                        c <= c + 1; 
+                        w_addr_b <= 10'(W_O_OFFSET) + 10'((r * S_DIM) + (c + 1));
+                        fsm <= READ; 
+                    end
+                end
+            endcase
         end
     end
 endmodule
@@ -289,15 +529,20 @@ module boreal_dshot_driver #(parameter int FRAC_W = 16)(
 
     always_comb begin
         logic [10:0] throttle;
-        logic signed [31:0] scaled = (action_q16 + (32'sd1 << FRAC_W)) >>> 6;
+        logic signed [31:0] norm;
+        logic signed [31:0] scaled;
+        
+        // Action Q16.16 -> throttle
+        norm = (action_q16 + (32'sd1 << FRAC_W)) >>> 1;
+        scaled = norm >>> (FRAC_W - 11);
+
         if (disarm) throttle = 11'd0;
         else if (scaled < 32'sd48)   throttle = 11'd48;
         else if (scaled > 32'sd2047) throttle = 11'd2047;
         else                         throttle = scaled[10:0];
         
-        logic [11:0] partial = {throttle, 1'b0};
-        logic [3:0]  crc = (partial[3:0] ^ partial[7:4] ^ partial[11:8]) & 4'hF;
-        frame = {partial, crc};
+        frame = {throttle, 1'b0, 
+                 ((throttle[2:0] ^ throttle[6:3] ^ throttle[10:7]) & 4'hF)};
     end
 
     always_ff @(posedge clk or negedge rst_n) begin

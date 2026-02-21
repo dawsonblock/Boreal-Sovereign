@@ -10,7 +10,6 @@ except ImportError:
     sys.exit(1)
 
 # Import the existing sovereign engine
-sys.path.append(os.path.expanduser("~/x1"))
 from boreal_apex_sovereign_v2 import (
     ALU_Q16,
     MetaEpistemicEnsemble,
@@ -24,11 +23,11 @@ from boreal_apex_sovereign_v2 import (
 config.s_dim = 12
 config.o_dim = 5
 config.a_dim = 1  # CartPole only has 1 actuator (track track)
-config.base_lr_shift = 7
+config.base_lr_shift = 5
 config.recov_lr_shift = 4
-config.cem_pop = 50
+config.cem_pop = 150
 config.cem_iters = 3
-config.horizon = 15
+config.horizon = 5
 
 
 class CartPoleFixedPointWrapper(gym.Wrapper):
@@ -64,12 +63,7 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
 
         # BOREAL outputs continuous linear actions (e.g. -1.5, +0.3)
         # Gym expects a Discrete 0 (Left -10.0N) or 1 (Right +10.0N).
-        # To bridge the purely linear cognitive topology of BOREAL with Gym,
-        # we dynamically throttle the CartPole physical force magnitude!
-
-        # Scale force linearly to the action. Clamped to realistic limits.
-        force_n = np.clip(abs(action_f) * 10.0, 0.0, 20.0)
-        self.env.unwrapped.force_mag = float(force_n)
+        self.env.unwrapped.force_mag = 10.0
 
         # Determine direction
         discrete_action = 1 if action_f > 0 else 0
@@ -95,12 +89,11 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
         self.env.unwrapped.state = (x, x_dot, theta, theta_dot)
 
         padded_obs = np.zeros(config.o_dim, dtype=np.float64)
-        padded_obs[0] = x * 0.02
-        padded_obs[1] = x_dot * 0.02
-        padded_obs[2] = math.sin(theta) * 1.0
-        padded_obs[3] = (1.0 - math.cos(theta)) * 1.0
-        padded_obs[4] = theta_dot * 0.05
-
+        padded_obs[0] = x
+        padded_obs[1] = x_dot
+        padded_obs[2] = math.sin(theta)
+        padded_obs[3] = math.cos(theta)
+        padded_obs[4] = theta_dot
         # Calculate a continuous tracking reward based on how upright the pole is
         # We need the pole balancing UP (theta near 0).
         # If it drops past horizontal (-pi/2 or pi/2), mathematically punish the agent heavily.
@@ -120,7 +113,7 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
         return ALU_Q16.to_q(padded_obs), continuous_reward, terminated, truncated, info
 
 
-def run_cartpole_boreal():
+def run_cartpole_boreal(max_episodes=300):
     print("🚀 Initializing BOREAL Engine for CartPole-v1...")
 
     raw_env = gym.make("CartPole-v1")
@@ -149,7 +142,6 @@ def run_cartpole_boreal():
     logger.log["ep_lens"] = []
 
     global_t = 0
-    max_episodes = 50
 
     for ep in range(max_episodes):
         o_q, _ = env.reset()
@@ -169,6 +161,16 @@ def run_cartpole_boreal():
                 exp_shift = 1 if ensemble.regime_stability < 30 else -2
 
             a_q = q16_cem_plan(ensemble, states_q, target_obs_q, exp_shift)
+
+            # --- HARDWARE SYMMETRY BREAKING ---
+            # If the RTL/Simulation weights are perfectly zeroed, and the cartpole
+            # naturally starts at (0,0,0,0), the gradients will exactly be 0.
+            # We must violently perturb the cartpole in the first few episodes
+            # to generate epistemic surprise & jump-start BGD accumulations!
+            if ep < 5 and t < 15:
+                # Override planner with uniform random Q16 noise [-0.5, 0.5]
+                noise_f = np.random.uniform(-0.5, 0.5)
+                a_q[0] = ALU_Q16.to_q(np.array(noise_f))
 
             o_q_next, reward, terminated, truncated, _ = env.step(a_q)
 
@@ -208,6 +210,7 @@ def run_cartpole_boreal():
                     f"[{m_str:<10}] EP:{ep+1} T:{t:03d} | Angle: {pole_angle:>5.2f} rad | Surp: {s_f:.3f} | Regime: [0x{ensemble.regime_hash}]"
                 )
 
+            o_q = o_q_next
             global_t += 1
 
             if terminated or truncated:
