@@ -11,11 +11,12 @@ except ImportError:
 # Import the existing sovereign engine
 from boreal_apex_sovereign_v2 import (
     ALU_Q16,
-    MetaEpistemicEnsemble,
-    TriStateGateQ16,
-    q16_cem_plan,
-    ApexLogger,
     config,
+    MetaEpistemicEnsemble,
+    q16_cem_plan,
+    TriStateGateQ16,
+    ApexLogger,
+    _xorshift32,
 )
 
 # Monkey-patch config for CartPole physics
@@ -73,7 +74,6 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
         x, x_dot, theta, theta_dot = self.env.unwrapped.state
 
         # Add physical walls at the edges of the track (-2.0 and +2.0)
-        # If the cart hits the wall, mathematically bounce it back by reversing its velocity
         if x > 2.0:
             x = 2.0
             x_dot = -x_dot * 0.5  # Bounce and dampen velocity
@@ -125,7 +125,8 @@ def run_cartpole_boreal(max_episodes=300):
     ensemble = MetaEpistemicEnsemble()
     gate = TriStateGateQ16()
 
-    states_q = [np.zeros(config.s_dim, dtype=np.int64) for _ in range(config.n_cores)]
+    states1_q = [np.zeros(config.s_dim, dtype=np.int64) for _ in range(config.n_cores)]
+    states2_q = [np.zeros(config.s2_dim, dtype=np.int64) for _ in range(config.n_cores)]
 
     # Target observation: Cart at center, Pole upright, velocities zero
     target_obs = np.zeros(config.o_dim, dtype=np.float64)
@@ -159,7 +160,14 @@ def run_cartpole_boreal(max_episodes=300):
                 active_lr = config.base_lr_shift
                 exp_shift = 1 if ensemble.regime_stability < 30 else -2
 
-            a_q, _ = q16_cem_plan(ensemble, states_q, target_obs_q, exp_shift)
+            a_q, _ = q16_cem_plan(
+                ensemble,
+                states1_q,
+                states2_q,
+                target_obs_q,
+                exp_shift,
+                np.int64((ep << 16) ^ t),
+            )
 
             # --- HARDWARE SYMMETRY BREAKING ---
             # If the RTL/Simulation weights are perfectly zeroed, and the cartpole
@@ -167,14 +175,16 @@ def run_cartpole_boreal(max_episodes=300):
             # We must violently perturb the cartpole in the first few episodes
             # to generate epistemic surprise & jump-start BGD accumulations!
             if ep < 5 and t < 15:
-                # Override planner with uniform random Q16 noise [-0.5, 0.5]
-                noise_f = np.random.uniform(-0.5, 0.5)
-                a_q[0] = ALU_Q16.to_q(np.array(noise_f))
+                # Deterministic PRNG to override planner with Q16 noise [-0.5, 0.5]
+                seed = (ep << 16) ^ t
+                seed = _xorshift32(seed)
+                # seed & 0xFFFF is 0-65535, -32768 centers it mapped to FixedPoint [-0.5, 0.5] natively.
+                a_q[0] = (seed & 0xFFFF) - 32768
 
             o_q_next, reward, terminated, truncated, _ = env.step(a_q)
 
-            states_q, surp_sq_q, unc_sq_q = ensemble.step(
-                states_q, a_q, o_q_next, active_lr
+            states1_q, states2_q, surp_sq_q, unc_sq_q = ensemble.step(
+                states1_q, states2_q, a_q, o_q_next, active_lr
             )
             block, flags = gate.evaluate(surp_sq_q, a_q)
 
@@ -209,14 +219,17 @@ def run_cartpole_boreal(max_episodes=300):
                     f"[{m_str:<10}] EP:{ep+1} T:{t:03d} | Angle: {pole_angle:>5.2f} rad | Surp: {s_f:.3f} | Regime: [0x{ensemble.regime_hash}]"
                 )
 
-            o_q = o_q_next
             global_t += 1
 
             if terminated or truncated:
                 print(f"💥 CartPole Terminated at Tick {t} (Global Tick {global_t})")
                 logger.log["ep_lens"].append(t)
-                states_q = [
+                states1_q = [
                     np.zeros(config.s_dim, dtype=np.int64)
+                    for _ in range(config.n_cores)
+                ]
+                states2_q = [
+                    np.zeros(config.s2_dim, dtype=np.int64)
                     for _ in range(config.n_cores)
                 ]
                 break

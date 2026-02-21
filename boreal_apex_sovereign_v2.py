@@ -72,6 +72,15 @@ def _alu_norm_sq(v_q):
     return sum_val
 
 
+@njit(cache=True)
+def _xorshift32(state):
+    x = state & 0xFFFFFFFF
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17) & 0xFFFFFFFF
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x & 0xFFFFFFFF
+
+
 class ALU_Q16:
     SHIFT = SHIFT
     ONE = ONE
@@ -142,6 +151,7 @@ class ALU_Q16:
 @dataclass
 class ApexConfig:
     s_dim: int = 12
+    s2_dim: int = 12
     o_dim: int = 24
     a_dim: int = 2
     n_cores: int = 3
@@ -164,13 +174,10 @@ class Q16PredictiveCore:
     def __init__(self, seed_offset=0):
         np.random.seed(42 + seed_offset)
         # BOREAL RTL explicitly initializes to a deterministic Linear Hash + Identity
-        # Breaking mathematical symmetry is critical since FPGA hosts no floating-point randn()
-
-        # Hash matches: weight_reg[i] <= 32'signed'((32'(i) * 32'd1664525) % 32'sd16384) - 32'sd8192
-        # We inject `seed_offset` to break symmetric predictions across the ensemble
         total_w = (
             config.s_dim * config.s_dim
             + config.s_dim * config.a_dim
+            + config.s_dim * config.s2_dim
             + config.o_dim * config.s_dim
         )
         w_flat = np.array(
@@ -182,57 +189,77 @@ class Q16PredictiveCore:
         )
 
         offset = 0
-        Ws_flat = w_flat[offset : offset + config.s_dim * config.s_dim] >> 3
+        W11_flat = w_flat[offset : offset + config.s_dim * config.s_dim] >> 3
 
         offset += config.s_dim * config.s_dim
-        Wa_flat = w_flat[offset : offset + config.s_dim * config.a_dim]
+        W1a_flat = w_flat[offset : offset + config.s_dim * config.a_dim]
 
         offset += config.s_dim * config.a_dim
+        W12_flat = w_flat[offset : offset + config.s_dim * config.s2_dim] >> 3
+
+        offset += config.s_dim * config.s2_dim
         C_flat = w_flat[offset : offset + config.o_dim * config.s_dim]
 
-        self.Ws = Ws_flat.reshape((config.s_dim, config.s_dim))
-        self.Wa = Wa_flat.reshape((config.s_dim, config.a_dim))
+        self.W11 = W11_flat.reshape((config.s_dim, config.s_dim))
+        self.W1a = W1a_flat.reshape((config.s_dim, config.a_dim))
+        self.W12 = W12_flat.reshape((config.s_dim, config.s2_dim))
         self.C = C_flat.reshape((config.o_dim, config.s_dim))
 
         # Apply Identity leaky overlays identical to `BOREAL` reset block
         for i in range(config.s_dim):
-            self.Ws[i, i] = int(0.9 * ALU_Q16.ONE)
+            self.W11[i, i] = int(0.9 * ALU_Q16.ONE)
+        for i in range(min(config.s_dim, config.s2_dim)):
+            self.W12[i, i] = int(0.1 * ALU_Q16.ONE)
 
-    def transition(self, s_q, a_q):
-        s_pred = ALU_Q16.mac(self.Ws, s_q) + ALU_Q16.mac(self.Wa, a_q)
-        return ALU_Q16.sat(s_pred, ALU_Q16.MAX_STATE)
+    def step(self, s1_q, s2_q, a_q, o_q, active_lr_shift):
+        # 2-Layer Hierarchical Top-Down Prediction
+        s1_pred_q = (
+            ALU_Q16.mac(self.W11, s1_q)
+            + ALU_Q16.mac(self.W12, s2_q)
+            + ALU_Q16.mac(self.W1a, a_q)
+        )
+        s1_pred_q = ALU_Q16.sat(s1_pred_q, ALU_Q16.MAX_STATE)
 
-    def predict_obs(self, s_q):
-        return ALU_Q16.mac(self.C, s_q)
+        o_pred_q = ALU_Q16.mac(self.C, s1_pred_q)
 
-    def step(self, s_q, a_q, o_q, active_lr_shift):
-        s_pred_q = self.transition(s_q, a_q)
-        o_pred_q = self.predict_obs(s_pred_q)
-        e_q = ALU_Q16.sat(o_q - o_pred_q, ALU_Q16.MAX_STATE)
+        # Bottom-Up Expectation Errors
+        e_o_q = ALU_Q16.sat(o_q - o_pred_q, ALU_Q16.MAX_STATE)
+        e_1_q = ALU_Q16.sat(s1_q - s1_pred_q, ALU_Q16.MAX_STATE)
 
-        correction_q = ALU_Q16.mac(self.C.T, e_q) >> config.k_shift
-        s_new_q = ALU_Q16.sat(s_pred_q + correction_q, ALU_Q16.MAX_STATE)
+        # State Correction (Local In-Place Error Flow)
+        correction_1_q = ALU_Q16.mac(self.C.T, e_o_q) >> config.k_shift
+        s1_new_q = ALU_Q16.sat(
+            s1_pred_q + correction_1_q - (e_1_q >> 2), ALU_Q16.MAX_STATE
+        )
 
-        # In-Place Hebbian Hardware Update
+        correction_2_q = ALU_Q16.mac(self.W12.T, e_1_q) >> config.k_shift
+        s2_new_q = ALU_Q16.sat(s2_q + (correction_2_q >> 2), ALU_Q16.MAX_STATE)
+
+        # In-Place Hebbian Hardware Updates
         self.C = ALU_Q16.sat(
-            self.C + (ALU_Q16.outer(e_q, s_pred_q) >> active_lr_shift),
+            self.C + (ALU_Q16.outer(e_o_q, s1_pred_q) >> active_lr_shift),
+            ALU_Q16.MAX_WEIGHT,
+        )
+        self.W11 = ALU_Q16.sat(
+            self.W11 + (ALU_Q16.outer(e_1_q, s1_q) >> active_lr_shift),
+            ALU_Q16.MAX_WEIGHT,
+        )
+        self.W12 = ALU_Q16.sat(
+            self.W12 + (ALU_Q16.outer(e_1_q, s2_q) >> active_lr_shift),
+            ALU_Q16.MAX_WEIGHT,
+        )
+        self.W1a = ALU_Q16.sat(
+            self.W1a + (ALU_Q16.outer(e_1_q, a_q) >> active_lr_shift),
             ALU_Q16.MAX_WEIGHT,
         )
 
-        e_s_q = ALU_Q16.sat(s_new_q - s_pred_q, ALU_Q16.MAX_STATE)
-        self.Ws = ALU_Q16.sat(
-            self.Ws + (ALU_Q16.outer(e_s_q, s_q) >> active_lr_shift), ALU_Q16.MAX_WEIGHT
-        )
-        self.Wa = ALU_Q16.sat(
-            self.Wa + (ALU_Q16.outer(e_s_q, a_q) >> active_lr_shift), ALU_Q16.MAX_WEIGHT
-        )
-
         # Hardware Weight Decay (Ensures eternal stability over millions of ticks)
-        self.Ws -= self.Ws >> config.decay_shift
-        self.Wa -= self.Wa >> config.decay_shift
+        self.W11 -= self.W11 >> config.decay_shift
+        self.W12 -= self.W12 >> config.decay_shift
+        self.W1a -= self.W1a >> config.decay_shift
         self.C -= self.C >> config.decay_shift
 
-        return s_new_q, e_q, o_pred_q
+        return s1_new_q, s2_new_q, e_o_q, o_pred_q
 
 
 # =====================================================================
@@ -244,13 +271,17 @@ class MetaEpistemicEnsemble:
         self.slow_z_q = np.zeros(config.s_dim, dtype=np.int64)
         self.regime_hash = "INIT"
         self.regime_stability = 0
+        self.surprise_lp = 0
 
-    def step(self, states_q, a_q, o_q, active_lr_shift):
-        new_states_q, preds_q = [], []
+    def step(self, states1_q, states2_q, a_q, o_q, active_lr_shift):
+        new_states1_q, new_states2_q, preds_q = [], [], []
 
         for i, core in enumerate(self.cores):
-            s_new, e_q, o_pred = core.step(states_q[i], a_q, o_q, active_lr_shift)
-            new_states_q.append(s_new)
+            s1_new, s2_new, e_o_q, o_pred = core.step(
+                states1_q[i], states2_q[i], a_q, o_q, active_lr_shift
+            )
+            new_states1_q.append(s1_new)
+            new_states2_q.append(s2_new)
             preds_q.append(o_pred)
 
         # True Integer Mean & Variance for Uncertainty
@@ -258,40 +289,57 @@ class MetaEpistemicEnsemble:
         unc_sq_q = (
             sum(ALU_Q16.norm_sq(p - mean_pred_q) for p in preds_q) // config.n_cores
         )
-        surprise_sq_q = ALU_Q16.norm_sq(e_q)
+
+        # Calculate ensemble surprise based on the mean ensemble error, terminating random core bias
+        mean_err_q = ALU_Q16.sat(o_q - mean_pred_q, ALU_Q16.MAX_STATE)
+        surprise_sq_q = ALU_Q16.norm_sq(mean_err_q)
 
         # L3 Abstract Regime Update (Event-Driven Context)
         if surprise_sq_q > (ALU_Q16.ONE >> 2):
-            self.slow_z_q += (new_states_q[0] - self.slow_z_q) >> 4
+            self.slow_z_q += (new_states1_q[0] - self.slow_z_q) >> 4
             self.regime_hash = hashlib.sha256(self.slow_z_q.tobytes()).hexdigest()[:6]
             self.regime_stability = 0
         else:
             self.regime_stability += 1
 
-        return new_states_q, surprise_sq_q, unc_sq_q
+        self.surprise_lp = (self.surprise_lp * 3 + surprise_sq_q) >> 2
+
+        return new_states1_q, new_states2_q, self.surprise_lp, unc_sq_q
 
 
 # =====================================================================
 # 5. INTEGER CEM PLANNER (Continuous Actions)
 # =====================================================================
 @njit(cache=True, fastmath=True)
+def _xorshift32(x):
+    x ^= (x << 13) & 0xFFFFFFFF
+    x ^= (x >> 17) & 0xFFFFFFFF
+    x ^= (x << 5) & 0xFFFFFFFF
+    return x
+
+
+@njit(cache=True, fastmath=True)
 def _q16_cem_plan_jit(
-    states_array,
+    states1_array,
+    states2_array,
     target_obs_q,
     explore_shift,
     n_cores,
     s_dim,
+    s2_dim,
     a_dim,
     o_dim,
     cem_pop,
     horizon,
     cem_iters,
-    Ws_array,
-    Wa_array,
+    W11_array,
+    W12_array,
+    W1a_array,
     C_array,
     ONE,
     MAX_STATE,
     SHIFT,
+    seed_base,
 ):
     mu_q = np.zeros((horizon, a_dim), dtype=np.int64)
     std_q = np.ones((horizon, a_dim), dtype=np.int64) * ONE
@@ -301,14 +349,18 @@ def _q16_cem_plan_jit(
     best_futures_q = np.zeros((horizon, o_dim), dtype=np.int64)
     best_efe_q = np.int64(1) << np.int64(60)
 
+    seed = seed_base
+
     for _ in range(cem_iters):
         noise_q = np.zeros((cem_pop, horizon, a_dim), dtype=np.int64)
         for i in range(cem_pop):
             for h in range(horizon):
                 for d in range(a_dim):
-                    v = 0
+                    v = np.int64(0)
                     for _k in range(3):
-                        v += np.random.randint(-2 * ONE, 2 * ONE)
+                        seed = _xorshift32(seed)
+                        r = seed & np.int64(0xFFFF)
+                        v += (r << (SHIFT - 15)) - (2 * ONE)
                     noise_q[i, h, d] = v // 3
 
         trajectories_q = np.zeros((cem_pop, horizon, a_dim), dtype=np.int64)
@@ -326,10 +378,13 @@ def _q16_cem_plan_jit(
 
         for i in range(cem_pop):
             traj_q = trajectories_q[i]
-            sim_states = np.zeros((n_cores, s_dim), dtype=np.int64)
+            sim_s1 = np.zeros((n_cores, s_dim), dtype=np.int64)
+            sim_s2 = np.zeros((n_cores, s2_dim), dtype=np.int64)
             for k in range(n_cores):
                 for d in range(s_dim):
-                    sim_states[k, d] = states_array[k, d]
+                    sim_s1[k, d] = states1_array[k, d]
+                for d in range(s2_dim):
+                    sim_s2[k, d] = states2_array[k, d]
 
             efe_q = np.int64(0)
             cur_futures_q = np.zeros((horizon, o_dim), dtype=np.int64)
@@ -338,17 +393,19 @@ def _q16_cem_plan_jit(
                 a_q = traj_q[h]
                 preds_q = np.zeros((n_cores, o_dim), dtype=np.int64)
                 for k in range(n_cores):
-                    s_pred = _alu_mac(Ws_array[k], sim_states[k]) + _alu_mac(
-                        Wa_array[k], a_q
+                    s1_pred = (
+                        _alu_mac(W11_array[k], sim_s1[k])
+                        + _alu_mac(W12_array[k], sim_s2[k])
+                        + _alu_mac(W1a_array[k], a_q)
                     )
                     for d in range(s_dim):
-                        if s_pred[d] > MAX_STATE:
-                            s_pred[d] = MAX_STATE
-                        elif s_pred[d] < -MAX_STATE:
-                            s_pred[d] = -MAX_STATE
-                        sim_states[k, d] = s_pred[d]
+                        if s1_pred[d] > MAX_STATE:
+                            s1_pred[d] = MAX_STATE
+                        elif s1_pred[d] < -MAX_STATE:
+                            s1_pred[d] = -MAX_STATE
+                        sim_s1[k, d] = s1_pred[d]
 
-                    preds_q[k] = _alu_mac(C_array[k], sim_states[k])
+                    preds_q[k] = _alu_mac(C_array[k], sim_s1[k])
 
                 prag_sq_q = _alu_norm_sq(preds_q[0] - target_obs_q)
 
@@ -358,7 +415,7 @@ def _q16_cem_plan_jit(
                     for k in range(n_cores):
                         s += preds_q[k, d]
                     mean_pred_q[d] = (s + (n_cores >> 1)) // n_cores
-                    cur_futures_q[h, d] = mean_pred_q[d]
+                cur_futures_q[h] = mean_pred_q
 
                 epist_sq_q = np.int64(0)
                 for k in range(n_cores):
@@ -416,43 +473,54 @@ def _q16_cem_plan_jit(
     return best_trajectory_q, best_futures_q
 
 
-def q16_cem_plan(ensemble, states_q, target_obs_q, explore_shift):
+def q16_cem_plan(
+    ensemble, states1_q, states2_q, target_obs_q, explore_shift, seed_base
+):
     """Cross-Entropy Method Planner operating natively through LLVM JIT."""
     n_cores = config.n_cores
     s_dim = config.s_dim
+    s2_dim = config.s2_dim
     a_dim = config.a_dim
     o_dim = config.o_dim
     horizon = config.horizon
 
-    Ws_array = np.zeros((n_cores, s_dim, s_dim), dtype=np.int64)
-    Wa_array = np.zeros((n_cores, s_dim, a_dim), dtype=np.int64)
+    W11_array = np.zeros((n_cores, s_dim, s_dim), dtype=np.int64)
+    W12_array = np.zeros((n_cores, s_dim, s2_dim), dtype=np.int64)
+    W1a_array = np.zeros((n_cores, s_dim, a_dim), dtype=np.int64)
     C_array = np.zeros((n_cores, o_dim, s_dim), dtype=np.int64)
-    states_array = np.zeros((n_cores, s_dim), dtype=np.int64)
+    states1_array = np.zeros((n_cores, s_dim), dtype=np.int64)
+    states2_array = np.zeros((n_cores, s2_dim), dtype=np.int64)
 
     for k, core in enumerate(ensemble.cores):
-        Ws_array[k] = core.Ws
-        Wa_array[k] = core.Wa
+        W11_array[k] = core.W11
+        W12_array[k] = core.W12
+        W1a_array[k] = core.W1a
         C_array[k] = core.C
-        states_array[k] = states_q[k]
+        states1_array[k] = states1_q[k]
+        states2_array[k] = states2_q[k]
 
     # Execute optimal trajectory derivation directly on native LLVM array processing
     best_traj_q, best_futures_q = _q16_cem_plan_jit(
-        states_array,
+        states1_array,
+        states2_array,
         target_obs_q,
         np.int64(explore_shift),
         n_cores,
         s_dim,
+        s2_dim,
         a_dim,
         o_dim,
         config.cem_pop,
         horizon,
         config.cem_iters,
-        Ws_array,
-        Wa_array,
+        W11_array,
+        W12_array,
+        W1a_array,
         C_array,
         ALU_Q16.ONE,
         ALU_Q16.MAX_STATE,
         ALU_Q16.SHIFT,
+        np.int64(seed_base),
     )
 
     return best_traj_q[0], best_futures_q
@@ -614,8 +682,11 @@ class ApexSovereign:
     def __init__(self):
         self.env, self.sdr, self.logger = Drone2D(), SDRProjector(), ApexLogger()
         self.ensemble, self.gate = MetaEpistemicEnsemble(), TriStateGateQ16()
-        self.states_q = [
+        self.states1_q = [
             np.zeros(config.s_dim, dtype=np.int64) for _ in range(config.n_cores)
+        ]
+        self.states2_q = [
+            np.zeros(config.s2_dim, dtype=np.int64) for _ in range(config.n_cores)
         ]
 
         self.tgt_x, self.tgt_y = 2.0, 2.0
@@ -654,8 +725,13 @@ class ApexSovereign:
                 active_lr = config.base_lr_shift
                 # Autonomous L3 Meta-Control modulating exploration
                 exp_shift = 1 if self.ensemble.regime_stability < 30 else -2
-                a_q = q16_cem_plan(
-                    self.ensemble, self.states_q, self.target_obs_q, exp_shift
+                a_q, _ = q16_cem_plan(
+                    self.ensemble,
+                    self.states1_q,
+                    self.states2_q,
+                    self.target_obs_q,
+                    exp_shift,
+                    np.int64(t ^ 42),
                 )
 
             # --- Physical Environment Step ---
@@ -663,10 +739,10 @@ class ApexSovereign:
             o_q = self.sdr.encode_q16(raw_pixels)
 
             # --- Cognitive Inference Step ---
-            self.states_q, surp_sq_q, unc_sq_q = self.ensemble.step(
-                self.states_q, a_q, o_q, active_lr
+            self.states1_q, self.states2_q, surp_lp_q, unc_sq_q = self.ensemble.step(
+                self.states1_q, self.states2_q, a_q, o_q, active_lr
             )
-            block, flags = self.gate.evaluate(surp_sq_q, a_q)
+            block, flags = self.gate.evaluate(surp_lp_q, a_q)
 
             # --- Sentinel Causal Fault Recovery ---
             if block and not recovery_mode and t > 50:
@@ -676,14 +752,14 @@ class ApexSovereign:
                 recovery_timer = 20  # Force epistemic foraging for 20 ticks
                 self.gate.reset()
 
-            if recovery_mode and recovery_timer <= 0 and surp_sq_q < (ALU_Q16.ONE >> 1):
+            if recovery_mode and recovery_timer <= 0 and surp_lp_q < (ALU_Q16.ONE >> 1):
                 print(
                     f"  [T:{t}] ✅ PHYSICS RE-ALIGNED. Lifting Gate Lock & Resuming Mission.\n"
                 )
                 recovery_mode = False
 
             self.logger.record(
-                self.env, surp_sq_q, unc_sq_q, self.ensemble.regime_hash, recovery_mode
+                self.env, surp_lp_q, unc_sq_q, self.ensemble.regime_hash, recovery_mode
             )
 
             if t % 15 == 0 or t == 120 or (recovery_mode and recovery_timer == 10):
@@ -692,7 +768,7 @@ class ApexSovereign:
                     if recovery_mode
                     else ("FORAGING" if exp_shift > 0 else "TARGETING")
                 )
-                s_f = np.sqrt(ALU_Q16.to_f(surp_sq_q))
+                s_f = np.sqrt(ALU_Q16.to_f(surp_lp_q))
                 print(
                     f"[{m_str:<10}] T:{t:03d} | Pos: ({self.env.x:>4.1f}, {self.env.y:>4.1f}) | Surp: {s_f:.3f} | Regime: [0x{self.ensemble.regime_hash}]"
                 )
