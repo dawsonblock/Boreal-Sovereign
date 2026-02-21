@@ -13,7 +13,6 @@ except ImportError:
 sys.path.append(os.path.expanduser("~/x1"))
 from boreal_apex_sovereign_v2 import (
     ALU_Q16,
-    ApexConfig,
     MetaEpistemicEnsemble,
     TriStateGateQ16,
     q16_cem_plan,
@@ -210,7 +209,6 @@ def run_cartpole_boreal():
                     f"[{m_str:<10}] EP:{ep+1} T:{t:03d} | Angle: {pole_angle:>5.2f} rad | Surp: {s_f:.3f} | Regime: [0x{ensemble.regime_hash}]"
                 )
 
-            o_q = o_q_next
             global_t += 1
 
             if terminated or truncated:

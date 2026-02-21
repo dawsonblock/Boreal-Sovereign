@@ -47,6 +47,7 @@ body {
   letter-spacing: -0.05em;
   background: linear-gradient(90deg, #fff, #8b8b99);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
@@ -128,6 +129,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 1.5rem;
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
 

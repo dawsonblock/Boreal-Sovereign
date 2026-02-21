@@ -3,10 +3,7 @@ import json
 import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import threading
 
-import sys
-import os
 import math
 import numpy as np
 import gymnasium as gym
@@ -84,8 +81,6 @@ class LiveCartPoleEngine:
         self.target_obs_q = ALU_Q16.to_q(target_obs)
 
     async def live_run(self):
-        import logging
-
         logging.basicConfig(
             level=logging.INFO,
             filename="cartpole_run.log",
@@ -164,7 +159,6 @@ class LiveCartPoleEngine:
 
             await self.broadcast(json.dumps(state_data))
 
-            o_q = o_q_next
             t += 1
             global_t += 1
 
