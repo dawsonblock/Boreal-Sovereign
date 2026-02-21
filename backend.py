@@ -22,9 +22,14 @@ from boreal_apex_sovereign_v2 import (
 )
 
 # Monkey-patch config for CartPole physics
+config.s_dim = 12
+config.o_dim = 24
+config.a_dim = 1  # CartPole only has 1 actuator (track track)
 config.base_lr_shift = 7
 config.recov_lr_shift = 4
-config.cem_pop = 30
+config.cem_pop = 50
+config.cem_iters = 3
+config.horizon = 15
 
 app = FastAPI()
 
