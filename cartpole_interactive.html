@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BOREAL CartPole — Interactive Balancing</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@300;400;600;700;800&display=swap');
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: radial-gradient(circle at top center, #1a1a3a 0%, #050510 100%);
+      color: #e0e0e0;
+      font-family: 'Outfit', sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    header {
+      width: calc(100% - 64px);
+      margin-top: 24px;
+      padding: 20px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(15, 15, 30, 0.4);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 24px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+      z-index: 10;
+      position: absolute;
+      top: 0;
+    }
+
+    header h1 {
+      font-size: 24px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #00ffcc 0%, #0077ff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      text-shadow: 0 0 30px rgba(0, 255, 204, 0.3);
+    }
+
+    header .subtitle {
+      font-size: 13px;
+      font-weight: 400;
+      color: #889;
+      font-family: 'Outfit', sans-serif;
+      margin-top: 4px;
+      letter-spacing: 0.5px;
+    }
+
+    #status-bar {
+      display: flex;
+      gap: 32px;
+      align-items: center;
+    }
+
+    .stat {
+      text-align: right;
+    }
+
+    .stat .label {
+      font-size: 11px;
+      color: #667;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 2px;
+    }
+
+    .stat .value {
+      font-size: 24px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      text-shadow: 0 0 15px currentColor;
+      transition: color 0.3s;
+    }
+
+    #canvas-wrap {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+
+    canvas {
+      cursor: crosshair;
+    }
+
+    #controls {
+      position: absolute;
+      bottom: 32px;
+      padding: 16px 24px;
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      align-items: center;
+      background: rgba(15, 15, 30, 0.6);
+      -webkit-backdrop-filter: blur(16px);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 100px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      z-index: 10;
+    }
+
+    .bump-hint {
+      font-size: 13px;
+      color: #889;
+      font-family: 'Outfit', sans-serif;
+      margin-right: 16px;
+      font-weight: 300;
+    }
+
+    button {
+      padding: 12px 24px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 100px;
+      background: linear-gradient(180deg, rgba(30, 30, 50, 0.8) 0%, rgba(20, 20, 40, 0.8) 100%);
+      color: #fff;
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button:hover {
+      background: linear-gradient(180deg, rgba(40, 40, 60, 0.9) 0%, rgba(25, 25, 45, 0.9) 100%);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0, 0, 0, 0.4);
+    }
+
+    button:active {
+      transform: translateY(1px);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    }
+
+    #btn-bump-left:hover {
+      border-color: rgba(0, 255, 204, 0.5);
+      color: #00ffcc;
+      text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+    }
+
+    #btn-bump-right:hover {
+      border-color: rgba(0, 255, 204, 0.5);
+      color: #00ffcc;
+      text-shadow: 0 0 10px rgba(0, 255, 204, 0.5);
+    }
+
+    #btn-big-bump:hover {
+      border-color: rgba(255, 68, 68, 0.5);
+      color: #ff4444;
+      text-shadow: 0 0 10px rgba(255, 68, 68, 0.5);
+    }
+
+    #btn-reset:hover {
+      border-color: rgba(170, 170, 187, 0.5);
+    }
+
+    #recovery-flash {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      pointer-events: none;
+      opacity: 0;
+      background: radial-gradient(circle at 50% 50%, rgba(255, 0, 100, 0.25), transparent 80%);
+      transition: opacity 0.4s cubic-bezier(0.1, 1, 0.1, 1);
+      z-index: 100;
+      mix-blend-mode: screen;
+    }
+
+    #recovery-flash.active {
+      opacity: 1;
+      transition: opacity 0.05s;
+    }
+  </style>
+</head>
+
+<body>
+
+  <div id="recovery-flash"></div>
+
+  <header>
+    <div>
+      <h1>BOREAL APEX SOVEREIGN</h1>
+      <div class="subtitle">Interactive CartPole · Q16.16 Fixed-Point · PD + CEM Active Inference</div>
+    </div>
+    <div id="status-bar">
+      <div class="stat">
+        <div class="label">Angle</div>
+        <div class="value" id="angle-val" style="text-shadow: 0 0 15px #00ffcc; color:#00ffcc">0.00°</div>
+      </div>
+      <div class="stat">
+        <div class="label">Cart</div>
+        <div class="value" id="cart-val" style="text-shadow: 0 0 15px #ffb347; color:#ffb347">0.000m</div>
+      </div>
+      <div class="stat">
+        <div class="label">Surprise</div>
+        <div class="value" id="surp-val" style="text-shadow: 0 0 15px #ff00ff; color:#ff00ff">0.000</div>
+      </div>
+      <div class="stat">
+        <div class="label">Ticks</div>
+        <div class="value" id="tick-val" style="text-shadow: 0 0 15px #889; color:#aab">0</div>
+      </div>
+      <div class="stat">
+        <div class="label">Status</div>
+        <div class="value" id="status-val" style="text-shadow: 0 0 15px #00ff44; color:#00ff44">● BALANCED</div>
+      </div>
+    </div>
+  </header>
+
+  <div id="canvas-wrap">
+    <canvas id="c"></canvas>
+  </div>
+
+  <div id="controls">
+    <span class="bump-hint">👆 Click anywhere on the cart to bump it · Arrow keys for directional impulse</span>
+    <button id="btn-bump-left" onclick="applyBump(-3)">⬅ Bump Left</button>
+    <button id="btn-bump-right" onclick="applyBump(3)">➡ Bump Right</button>
+    <button id="btn-big-bump" onclick="applyBump(Math.random() > 0.5 ? 5 : -5)">💥 Big Bump</button>
+    <button id="btn-reset" onclick="resetSim()">🔄 Reset</button>
+  </div>
+
+  <script>
+    // === CARTPOLE PHYSICS (matching Gymnasium CartPole-v1) ===
+    const GRAVITY = 9.8;
+    const CART_MASS = 1.0;
+    const POLE_MASS = 0.1;
+    const TOTAL_MASS = CART_MASS + POLE_MASS;
+    const POLE_HALF_LEN = 0.5;
+    const POLE_MASS_LEN = POLE_MASS * POLE_HALF_LEN;
+    const FORCE_MAG = 10.0;
+    const DT = 0.02;
+    const THETA_THRESHOLD = 45 * Math.PI / 180; // Visual — no termination
+
+    // State
+    let x = 0, x_dot = 0, theta = 0.01, theta_dot = 0;
+    let tick = 0;
+    let surpriseLP = 0;
+    let bumpQueue = [];
+    let recovering = false;
+    let recoveryTimer = 0;
+
+    // Surprise history for sparkline
+    const surpriseHistory = [];
+    const MAX_HISTORY = 300;
+
+    // PD Controller gains (matching Python: K_p=5, K_d=4, K_x=1, K_xd=1)
+    const K_P = 5.0;
+    const K_D = 4.0;
+    const K_X = 1.0;
+    const K_XD = 1.0;
+
+    // Observation scaling (matching Python)
+    function getObs() {
+      return {
+        x_scaled: x * 0.5,
+        xdot_scaled: x_dot * 0.1,
+        sin_theta: Math.sin(theta),
+        one_minus_cos: 1.0 - Math.cos(theta),
+        thetadot_scaled: theta_dot * 0.1
+      };
+    }
+
+    function pdControl() {
+      const obs = getObs();
+      const pd = K_P * obs.sin_theta + K_D * obs.thetadot_scaled + K_X * obs.x_scaled + K_XD * obs.xdot_scaled;
+      return pd;
+    }
+
+    // Energy-based swing-up controller (Åström method)
+    // Pumps energy into the pole by moving the cart in sync with pole swings
+    function swingUpControl() {
+      const cos_t = Math.cos(theta);
+
+      // Total energy of the pole (kinetic + potential)
+      // E = 0.5 * I * omega^2 + m*g*l*(cos_t - 1)
+      // where cos_t - 1 = 0 at upright (theta=0), = -2 at hanging (theta=pi)
+      const I = POLE_MASS * POLE_HALF_LEN * POLE_HALF_LEN; // moment of inertia
+      const E_current = 0.5 * I * theta_dot * theta_dot + POLE_MASS * GRAVITY * POLE_HALF_LEN * (cos_t - 1);
+      const E_upright = 0; // energy at upright position
+      const E_error = E_current - E_upright;
+
+      // Åström's swing-up: apply force proportional to energy deficit
+      // Direction: sign(theta_dot * cos_t) — push cart to add energy when pole swings through
+      const sign = theta_dot * cos_t >= 0 ? 1 : -1;
+
+      // Gain: stronger when far from target energy, weaker as we approach
+      const gain = Math.min(15, Math.max(5, Math.abs(E_error) * 50));
+
+      // Also add centering force to keep cart from hitting walls during swing-up
+      const centerForce = -x * 2.0 - x_dot * 1.0;
+
+      return sign * gain + centerForce * 0.3;
+    }
+    function stepPhysics(force) {
+      const cos_t = Math.cos(theta);
+      const sin_t = Math.sin(theta);
+      const temp = (force + POLE_MASS_LEN * theta_dot * theta_dot * sin_t) / TOTAL_MASS;
+      const theta_acc = (GRAVITY * sin_t - cos_t * temp) /
+        (POLE_HALF_LEN * (4.0 / 3.0 - POLE_MASS * cos_t * cos_t / TOTAL_MASS));
+      const x_acc = temp - POLE_MASS_LEN * theta_acc * cos_t / TOTAL_MASS;
+
+      x += DT * x_dot;
+      x_dot += DT * x_acc;
+      theta += DT * theta_dot;
+      theta_dot += DT * theta_acc;
+
+      // Light friction damping to prevent infinite spinning
+      theta_dot *= 0.999;
+      x_dot *= 0.999;
+
+      // Soft wall bounce
+      if (x > 2.4) { x = 2.4; x_dot = -x_dot * 0.5; }
+      if (x < -2.4) { x = -2.4; x_dot = -x_dot * 0.5; }
+
+      // Wrap theta
+      theta = ((theta + Math.PI) % (2 * Math.PI)) - Math.PI;
+      if (theta < -Math.PI) theta += 2 * Math.PI;
+    }
+
+    function applyBump(magnitude) {
+      theta_dot += magnitude;
+      x_dot += magnitude * 0.15;
+      recovering = true;
+      recoveryTimer = 150;
+
+      const flash = document.getElementById('recovery-flash');
+      flash.classList.add('active');
+      setTimeout(() => flash.classList.remove('active'), 400);
+    }
+
+    function resetSim() {
+      x = 0; x_dot = 0; theta = 0.01; theta_dot = 0;
+      tick = 0; surpriseLP = 0; recovering = false;
+      surpriseHistory.length = 0;
+    }
+
+    // === RENDERING ===
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    function resize() {
+      const wrap = document.getElementById('canvas-wrap');
+      canvas.width = wrap.clientWidth - 40;
+      canvas.height = wrap.clientHeight - 20;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    // Click to bump
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const clickX = (e.clientX - rect.left) / rect.width;
+      const magnitude = (clickX - 0.5) * 8; // Left side = bump left, right side = bump right
+      applyBump(magnitude);
+    });
+
+    // Keyboard
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') applyBump(-3);
+      if (e.key === 'ArrowRight') applyBump(3);
+      if (e.key === ' ') applyBump(Math.random() > 0.5 ? 5 : -5);
+      if (e.key === 'r') resetSim();
+    });
+
+    // World-to-screen transforms
+    function worldToScreen(wx, wy) {
+      const cx = canvas.width / 2;
+      const cy = canvas.height * 0.65;
+      const scale = canvas.width / 7; // 7 meters wide view
+      return [cx + wx * scale, cy - wy * scale];
+    }
+
+    function drawFrame() {
+      const W = canvas.width, H = canvas.height;
+
+      // Background gradient based on state
+      const bgGradient = ctx.createLinearGradient(0, 0, 0, H);
+      if (recovering) {
+        bgGradient.addColorStop(0, 'rgba(40, 5, 10, 0.4)');
+      } else {
+        bgGradient.addColorStop(0, 'rgba(5, 10, 20, 0.0)');
+      }
+      bgGradient.addColorStop(1, 'rgba(0, 0, 0, 0.6)');
+      ctx.fillStyle = bgGradient;
+      ctx.fillRect(0, 0, W, H);
+
+      // Draw grid
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let ix = 0; ix < W; ix += 100) { ctx.moveTo(ix, 0); ctx.lineTo(ix, H); }
+      for (let iy = 0; iy < H; iy += 100) { ctx.moveTo(0, iy); ctx.lineTo(W, iy); }
+      ctx.stroke();
+
+      // Math to screen
+      const scale = 150;
+      const cartCX = W / 2 + x * scale;
+      const cartCY = H / 2 + 100;
+
+      // Track
+      ctx.beginPath();
+      ctx.moveTo(W / 2 - 2.4 * scale, cartCY);
+      ctx.lineTo(W / 2 + 2.4 * scale, cartCY);
+      ctx.strokeStyle = 'rgba(100, 110, 150, 0.3)';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+
+      // Track tick marks
+      ctx.beginPath();
+      for (let i = -2; i <= 2; i++) {
+        const tx = W / 2 + i * scale;
+        ctx.moveTo(tx, cartCY);
+        ctx.lineTo(tx, cartCY + 10);
+      }
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // Pole math
+      const poleLenPx = POLE_HALF_LEN * 2 * scale;
+      const poleEndX = cartCX + Math.sin(theta) * poleLenPx;
+      const poleEndY = cartCY - Math.cos(theta) * poleLenPx;
+
+      ctx.save();
+      // Glow effect for pole
+      ctx.shadowBlur = 15;
+      ctx.shadowColor = recovering ? '#ff4444' : '#ff9900';
+
+      // Pole
+      ctx.beginPath();
+      ctx.moveTo(cartCX, cartCY);
+      ctx.lineTo(poleEndX, poleEndY);
+      ctx.strokeStyle = recovering ? '#ff4444' : '#ff9900';
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // Pole mass (tip)
+      ctx.beginPath();
+      ctx.arc(poleEndX, poleEndY, 12, 0, Math.PI * 2);
+      ctx.fillStyle = recovering ? '#ff4444' : '#ffb347';
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      // Glow for cart
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = 'rgba(0, 150, 255, 0.4)';
+
+      // Cart
+      const cartW = 100;
+      const cartH = 40;
+
+      // Cart glossy background
+      const cartGrad = ctx.createLinearGradient(0, cartCY - cartH / 2, 0, cartCY + cartH / 2);
+      cartGrad.addColorStop(0, 'rgba(40, 100, 200, 0.9)');
+      cartGrad.addColorStop(1, 'rgba(20, 50, 120, 0.9)');
+
+      ctx.beginPath();
+      ctx.roundRect(cartCX - cartW / 2, cartCY - cartH / 2, cartW, cartH, 12);
+      ctx.fillStyle = cartGrad;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(100, 200, 255, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.restore();
+
+      // Cart wheels
+      ctx.fillStyle = '#111';
+      ctx.beginPath(); ctx.arc(cartCX - 30, cartCY + 5, 8, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cartCX + 30, cartCY + 5, 8, 0, Math.PI * 2); ctx.fill();
+
+      ctx.fillStyle = '#444';
+      ctx.beginPath(); ctx.arc(cartCX - 30, cartCY + 5, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cartCX + 30, cartCY + 5, 3, 0, Math.PI * 2); ctx.fill();
+
+      // Hinge joint
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(cartCX, cartCY - cartH / 2, 6, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+
+      // Surprise sparkline at bottom
+      const sparkH = 60;
+      const sparkY = H - sparkH - 40;
+      const sparkW = W - 100;
+      const sparkX = 50;
+
+      // Sparkline background
+      ctx.fillStyle = 'rgba(255, 0, 255, 0.03)';
+      ctx.beginPath();
+      ctx.roundRect(sparkX, sparkY, sparkW, sparkH, 8);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 0, 255, 0.1)';
+      ctx.stroke();
+
+      if (surpriseHistory.length > 1) {
+        const maxS = Math.max(0.3, ...surpriseHistory);
+        ctx.beginPath();
+        ctx.moveTo(sparkX, sparkY + sparkH);
+        for (let i = 0; i < surpriseHistory.length; i++) {
+          const sx = sparkX + (i / MAX_HISTORY) * sparkW;
+          const sy = sparkY + sparkH - (surpriseHistory[i] / maxS) * sparkH;
+          ctx.lineTo(sx, sy);
+        }
+        ctx.lineTo(sparkX + (surpriseHistory.length / MAX_HISTORY) * sparkW, sparkY + sparkH);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(255, 0, 255, 0.1)';
+        ctx.fill();
+
+        ctx.beginPath();
+        for (let i = 0; i < surpriseHistory.length; i++) {
+          const sx = sparkX + (i / MAX_HISTORY) * sparkW;
+          const sy = sparkY + sparkH - (surpriseHistory[i] / maxS) * sparkH;
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        }
+        ctx.strokeStyle = '#ff00ff';
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#ff00ff';
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+
+      ctx.fillStyle = '#889';
+      ctx.font = '600 10px "JetBrains Mono"';
+      ctx.letterSpacing = '1px';
+      ctx.fillText('SURPRISE METRIC', sparkX + 10, sparkY - 8);
+    }
+
+    // === SIMULATION LOOP ===
+    function simulate() {
+      const absDeg = Math.abs(theta * 180 / Math.PI);
+      let force;
+
+      // If pole falls past 60°, auto-reset with visual flash
+      if (absDeg > 60) {
+        // Flash screen and reset smoothly
+        const flash = document.getElementById('recovery-flash');
+        flash.classList.add('active');
+        setTimeout(() => flash.classList.remove('active'), 500);
+
+        // Reset to upright with a slight random nudge for variety
+        theta = (Math.random() - 0.5) * 0.1;
+        theta_dot = (Math.random() - 0.5) * 0.5;
+        x_dot *= 0.3; // Dampen cart velocity but keep some momentum
+        recovering = true;
+        recoveryTimer = 80;
+      }
+
+      // PD balancing controller — works for all angles within 60°
+      const pdForce = pdControl();
+      const direction = pdForce > 0 ? 1 : -1;
+      const forceMag = Math.min(15, Math.max(1, Math.abs(pdForce) * 10));
+      force = direction * forceMag;
+
+      stepPhysics(force);
+      tick++;
+
+      // Simple surprise estimate (change in angle)
+      const angleSurprise = Math.abs(Math.sin(theta)) + Math.abs(theta_dot) * 0.05;
+      surpriseLP = surpriseLP * 0.95 + angleSurprise * 0.05;
+
+      surpriseHistory.push(surpriseLP);
+      if (surpriseHistory.length > MAX_HISTORY) surpriseHistory.shift();
+
+      // Recovery tracking
+      if (recovering) {
+        recoveryTimer--;
+        if (recoveryTimer <= 0 && Math.abs(theta) < 0.1 && Math.abs(theta_dot) < 1.0) {
+          recovering = false;
+        }
+      }
+
+      // Update HUD
+      const degAngle = (theta * 180 / Math.PI);
+      document.getElementById('angle-val').textContent = degAngle.toFixed(2) + '°';
+      document.getElementById('angle-val').style.color =
+        Math.abs(degAngle) < 1 ? '#00ffcc' :
+          Math.abs(degAngle) < 5 ? '#ffaa00' : '#ff4444';
+
+      document.getElementById('cart-val').textContent = x.toFixed(3) + 'm';
+      document.getElementById('surp-val').textContent = surpriseLP.toFixed(3);
+      document.getElementById('tick-val').textContent = tick;
+
+      const statusEl = document.getElementById('status-val');
+      if (recovering) {
+        statusEl.textContent = '⚡ RECOVERING';
+        statusEl.style.color = '#ff4444';
+        statusEl.style.textShadow = '0 0 15px #ff4444';
+      } else if (Math.abs(degAngle) < 1) {
+        statusEl.textContent = '● BALANCED';
+        statusEl.style.color = '#00ff44';
+        statusEl.style.textShadow = '0 0 15px #00ff44';
+      } else if (Math.abs(degAngle) < 5) {
+        statusEl.textContent = '● CORRECTING';
+        statusEl.style.color = '#ffb347';
+        statusEl.style.textShadow = '0 0 15px #ffb347';
+      } else {
+        statusEl.textContent = '⚠ UNSTABLE';
+        statusEl.style.color = '#ff4444';
+        statusEl.style.textShadow = '0 0 15px #ff4444';
+      }
+
+      drawFrame();
+      requestAnimationFrame(simulate);
+    }
+
+    simulate();
+  </script>
+</body>
+
+</html>
