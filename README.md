@@ -1,43 +1,91 @@
 <div align="center">
+  <img src="https://img.shields.io/badge/Python-3.9%2B-blue?style=for-the-badge&logo=python" alt="Python Version"/>
+  <img src="https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi" alt="FastAPI"/>
+  <img src="https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB" alt="React"/>
+  <img src="https://img.shields.io/badge/Numba-00A9E0?style=for-the-badge&logo=numba" alt="Numba"/>
+  <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License"/>
+
   <h1>Boreal Apex Sovereign v2</h1>
   <p><strong>Hardware-Aligned Active Inference & Toroidal Ghost Telemetry Engine</strong></p>
 </div>
 
-![Dashboard Preview](assets/dashboard_preview.png)
+![Stable Ghost Telemetry Run](assets/stable_run.webp)
 
-## 📌 Overview
+## 📌 Engine Overview
 
-**Boreal Apex Sovereign** is a deeply optimized, 100% integer (Q16.16 Fixed Point) Active Inference mathematical engine. Designed to seamlessly translate between biological cognitive principles and bare-metal FPGA hardware, it governs high-frequency nonlinear systems (like the infinite Toroidal CartPole) with temporal foresight and adaptive autonomous fault recovery.
+**Boreal Apex Sovereign** is a deeply optimized, 100% integer (Q16.16 Fixed Point) Active Inference mathematical engine. Designed to seamlessly translate between biological cognitive principles and bare-metal RTL hardware, it governs high-frequency nonlinear systems—such as the unbound, infinitely wrapping Toroidal CartPole—with temporal foresight and adaptive autonomous fault recovery.
 
-Rather than relying on generic deep learning or floating-point abstractions, Boreal Apex Sovereign achieves its intelligence through **Bounded Gradient Descent (BGD)**, continuous **Model Predictive Control (MPC)** temporal sequences, and deterministic **Numba JIT compilation** scaled for high-performance execution.
+Unlike traditional Reinforcement Learning paradigms that leverage floating-point abstractions and episodic mortality to slowly build value functions, Boreal Apex Sovereign achieves its intelligence through **Bounded Gradient Descent (BGD)**, continuous **Model Predictive Control (MPC)** temporal sequences, and deterministic **Numba JIT compilation** scaled for massive-throughput hardware equivalence.
 
-## 🚀 Key Features
+---
 
-* **Real-time Toroid Hologram Telemetry**: A live 50Hz React/FastAPI interface visualizing the system's true internal state. The engine streams its N-step epistemic foresight—projected as a transparent gradient of "Ghost" futures—evaluating multi-path trajectories in real-time.
-* **Q16.16 ALU Kernels**: Entire predictive matrices are computed without floating-point arithmetic. Safe, zero-allocation tensor accumulations mirror native SystemVerilog block-matrix DSPs down to the bitwise shifts.
-* **Tri-State Sentinel Gate**: Autonomous causal modeling identifies kinetic shock anomalies and hardware degradation (such as snapped motor linkages) to force immediate epistemic "foraging" to rapidly re-absorb the changed physics.
-* **Numba JIT Microcode Architecture**: Python overhead is eviscerated. Core prediction dynamics are structured purely on Numpy `int64` LLVM arrays mapping to parallelized hardware pipelines, ripping through massive exploration batches.
-* **Receding Horizon CEM Control**: Actively optimizes multi-step continuous sequences using Cross-Entropy Method filtering, ensuring long-term systemic stability and minimal thermodynamic free energy.
+## 🏗 System Architecture
+
+```mermaid
+graph TD
+    subgraph Environment [Physical Simulation]
+        A[CartPole-v1] --> B[FixedPointToroidWrapper]
+    end
+
+    subgraph Sovereign Engine [Boreal Apex Sovereign v2]
+        C[Epistemic Ensemble L3] --> D[Q16 Predictive Cores]
+        D --> E[_q16_cem_plan_jit Numba LLVM]
+        E -->|MPC Horizon Array| F[Tri-State Sentinel Gate]
+        F -->|BGD In-place Update| D
+    end
+
+    subgraph Telemetry [Real-time Stream]
+        G[FastAPI WebSocket] --> H[React Vite Dashboard]
+    end
+
+    B -->|State Obs o_q| C
+    E -->|Continuous Control a_q| B
+    E -->|futures_q| G
+    C -->|Surprise / Uncertainty| G
+```
+
+---
+
+## 🚀 Key Technological Pillars
+
+### 1. 👻 Real-time Toroid Hologram Telemetry
+
+A live 50Hz React/FastAPI interface visualizing the system's true internal generative model. The engine streams its 15-step LLVM epistemic foresight matrix. This is projected onto the dashboard as a transparent gradient of "Ghost" futures, directly proving the engine is evaluating multi-path trajectories across the continuous CartPole state-space in real-time.
+
+### 2. 🧮 Native Q16.16 ALU Kernels
+
+Entire generative matrices (`Ws`, `Wa`, `C`) are computed without any floating-point arithmetic. Safe, zero-allocation tensor accumulations mirror native SystemVerilog block-matrix DSPs down to the bitwise shifts (e.g., `((a_q * b_q) + HALF) >> SHIFT`), guaranteeing 1:1 behavioral equivalence with actual hardware compilation targets.
+
+### 3. 🛡️ Tri-State Sentinel Gate & Autonomous Hebbian Repair
+
+The system employs an autonomous causal modeling gate that identifies kinetic shock anomalies or hardware degradation (such as instantaneously escalated drag coefficients or dropped packets). When triggered, it forces immediate epistemic "foraging," temporarily overpowering the receding horizon control to rapidly absorb the abruptly changed physical ruleset via continuous **Bounded Gradient Descent (BGD)** constraints.
+
+### 4. ⚡ Numba JIT Microcode Architecture
+
+Python overhead is completely eviscerated. Core prediction dynamics are structured purely on Numpy `int64` LLVM arrays, effectively matching the structural parallelism of the physical SystemVerilog DSPs and allowing thousands of simulated sequences per millisecond.
+
+---
 
 ## 🛠 Project Structure
 
-* `boreal_apex_sovereign_v2.py`: The core LLVM-optimized Cognitive Engine. Features the `Q16PredictiveCore`, `MetaEpistemicEnsemble`, and the parallel `_q16_cem_plan_jit` trajectory evaluator.
-* `boreal_cartpole.py`: The primary simulation wrapper executing the unbound, continuously wrapping Toroidal physics space and exposing sensory vectors to the SDR projector.
-* `backend.py`: A `FastAPI` instance hosting the mathematical pipeline and maintaining a `ws://localhost:8000/ws/telemetry` socket to broadcast parsed Toroid trajectory maps and cognitive integers.
-* `cartpole-dashboard/`: The `React + Vite` visualizer client displaying dynamic Ghost Hologram trails representing the agent's spatial anticipation logic.
+* `boreal_apex_sovereign_v2.py`: The core LLVM-optimized Cognitive Engine. Features the `Q16PredictiveCore`, `MetaEpistemicEnsemble`, and the parallel `_q16_cem_plan_jit` trajectory sequence evaluator.
+* `boreal_cartpole.py`: The primary simulation wrapper executing the continuously wrapping Toroidal physics space and translating forces mathematically.
+* `backend.py`: A `FastAPI` instance hosting the mathematical pipeline and maintaining a `ws://localhost:8000/ws/telemetry` multiplexed socket.
+* `cartpole-dashboard/`: The `React + Vite` visualizer client displaying dynamic Ghost Hologram trails and cognitive free-energy graphs.
+
+---
 
 ## 🖥 Getting Started
 
 ### 1. Prerequisites
 
-Ensure you have the following installed:
+Ensure you have the following installed on your host system:
 
 * Python 3.9+
 * Node.js & NPM
+* Git
 
-### 2. Back-End Initialization (Python AI Core)
-
-Install dependencies and boot up the Telemetry API:
+### 2. Booting the Python Backend Telemetry Core
 
 ```bash
 # Clone the repository
@@ -45,7 +93,7 @@ git clone https://github.com/dawsonblock/Boreal-Sovereign.git
 cd Boreal-Sovereign
 
 # Install the Python stack
-pip install numpy fastapi uvicorn websockets numba gymnasium
+pip install numpy fastapi uvicorn websockets numba gymnasium matplotlib
 
 # Run the backend server
 python backend.py
@@ -53,7 +101,7 @@ python backend.py
 
 *(The API will establish endpoints at `localhost:8000`)*
 
-### 3. Front-End Initialization (React Dashboard)
+### 3. Booting the React Dashboard
 
 In a separate terminal, launch the Live Hologram Interface:
 
@@ -71,11 +119,11 @@ npm run dev
 
 Open your browser to `http://localhost:5173`.  
 Click **INITIALIZE CARTPOLE RUN**.  
-Watch closely as the primary (opaque) physical entity is dynamically preceded by fading (transparent) predictive "Ghost" duplicates—showcasing the LLVM core mathematically forecasting reality up to 15 temporal steps in advance to compute the lowest-energy sequence of behavior!
 
-## 🧪 Background & BGD Research
-
-Boreal Sovereign builds upon continuous-world abstractions rather than standard isolated Reinforcement Learning loops. It does not wait to explicitly "die" to learn. Using the **Bounded Gradient Descent** updater matrices (`W_new = W_old - (LAMBDA * W_old) + (ETA * error * state)`), it actively and continuously modifies physical representations at microsecond scales in tandem with real-world temporal dynamics.
+You will observe the primary (opaque) physical entity dynamically preceded by fading (transparent) predictive "Ghost" duplicates. This represents the LLVM core mathematically forecasting reality up to *15 temporal steps in advance* to select the lowest-energy sequence of macro-behavior!
 
 ---
-*Created and optimized for the BOREAL mathematical hardware ecosystem.*
+
+<div align="center">
+    <i>"Sovereignty through native architecture."</i>
+</div>
