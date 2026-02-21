@@ -16,10 +16,12 @@ from boreal_apex_sovereign_v2 import (
     TriStateGateQ16,
     q16_cem_plan,
     config,
+    _xorshift32,
 )
 
 # Monkey-patch config for CartPole physics
 config.s_dim = 12
+config.s2_dim = 12
 config.o_dim = 5
 config.a_dim = 1  # CartPole only has 1 actuator (track track)
 config.base_lr_shift = 7
@@ -72,8 +74,11 @@ class LiveCartPoleEngine:
         self.ensemble = MetaEpistemicEnsemble()
         self.gate = TriStateGateQ16()
 
-        self.states_q = [
+        self.states1_q = [
             np.zeros(config.s_dim, dtype=np.int64) for _ in range(config.n_cores)
+        ]
+        self.states2_q = [
+            np.zeros(config.s2_dim, dtype=np.int64) for _ in range(config.n_cores)
         ]
 
         # Target observation: Cart at center, Pole upright, velocities zero
@@ -109,20 +114,26 @@ class LiveCartPoleEngine:
                 exp_shift = 1 if self.ensemble.regime_stability < 30 else -2
 
             a_q, futures_q = q16_cem_plan(
-                self.ensemble, self.states_q, self.target_obs_q, exp_shift
+                self.ensemble,
+                self.states1_q,
+                self.states2_q,
+                self.target_obs_q,
+                exp_shift,
+                np.int64((ep << 16) ^ t),
             )
 
             # --- HARDWARE SYMMETRY BREAKING ---
             if ep < 5 and t < 15:
-                noise_f = np.random.uniform(-0.5, 0.5)
-                a_q[0] = ALU_Q16.to_q(np.array(noise_f))
+                seed = (ep << 16) ^ t
+                seed = _xorshift32(seed)
+                a_q[0] = (seed & 0xFFFF) - 32768
                 # Futures remain whatever the predictive engine guessed,
                 # but the physical action is overwritten by noise.
 
             o_q_next, reward, terminated, truncated, _ = self.env.step(a_q)
 
-            self.states_q, surp_sq_q, unc_sq_q = self.ensemble.step(
-                self.states_q, a_q, o_q_next, active_lr
+            self.states1_q, self.states2_q, surp_sq_q, unc_sq_q = self.ensemble.step(
+                self.states1_q, self.states2_q, a_q, o_q_next, active_lr
             )
             block, flags = self.gate.evaluate(surp_sq_q, a_q)
 

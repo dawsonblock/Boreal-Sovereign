@@ -311,14 +311,6 @@ class MetaEpistemicEnsemble:
 # 5. INTEGER CEM PLANNER (Continuous Actions)
 # =====================================================================
 @njit(cache=True, fastmath=True)
-def _xorshift32(x):
-    x ^= (x << 13) & 0xFFFFFFFF
-    x ^= (x >> 17) & 0xFFFFFFFF
-    x ^= (x << 5) & 0xFFFFFFFF
-    return x
-
-
-@njit(cache=True, fastmath=True)
 def _q16_cem_plan_jit(
     states1_array,
     states2_array,
