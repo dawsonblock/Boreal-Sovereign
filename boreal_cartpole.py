@@ -1,5 +1,4 @@
 import sys
-import os
 import numpy as np
 import math
 
@@ -160,7 +159,7 @@ def run_cartpole_boreal(max_episodes=300):
                 active_lr = config.base_lr_shift
                 exp_shift = 1 if ensemble.regime_stability < 30 else -2
 
-            a_q = q16_cem_plan(ensemble, states_q, target_obs_q, exp_shift)
+            a_q, _ = q16_cem_plan(ensemble, states_q, target_obs_q, exp_shift)
 
             # --- HARDWARE SYMMETRY BREAKING ---
             # If the RTL/Simulation weights are perfectly zeroed, and the cartpole

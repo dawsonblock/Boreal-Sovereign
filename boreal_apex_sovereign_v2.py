@@ -298,6 +298,7 @@ def _q16_cem_plan_jit(
     n_elite = max(1, cem_pop // 3)
 
     best_trajectory_q = np.zeros((horizon, a_dim), dtype=np.int64)
+    best_futures_q = np.zeros((horizon, o_dim), dtype=np.int64)
     best_efe_q = np.int64(1) << np.int64(60)
 
     for _ in range(cem_iters):
@@ -331,6 +332,7 @@ def _q16_cem_plan_jit(
                     sim_states[k, d] = states_array[k, d]
 
             efe_q = np.int64(0)
+            cur_futures_q = np.zeros((horizon, o_dim), dtype=np.int64)
 
             for h in range(horizon):
                 a_q = traj_q[h]
@@ -356,6 +358,7 @@ def _q16_cem_plan_jit(
                     for k in range(n_cores):
                         s += preds_q[k, d]
                     mean_pred_q[d] = (s + (n_cores >> 1)) // n_cores
+                    cur_futures_q[h, d] = mean_pred_q[d]
 
                 epist_sq_q = np.int64(0)
                 for k in range(n_cores):
@@ -381,6 +384,8 @@ def _q16_cem_plan_jit(
                 for h in range(horizon):
                     for d in range(a_dim):
                         best_trajectory_q[h, d] = traj_q[h, d]
+                    for d in range(o_dim):
+                        best_futures_q[h, d] = cur_futures_q[h, d]
 
         idx = np.argsort(scores_int)
 
@@ -408,7 +413,7 @@ def _q16_cem_plan_jit(
                         y = (x + val // x) >> 1
                     std_q[h, d] = x
 
-    return best_trajectory_q[0]
+    return best_trajectory_q, best_futures_q
 
 
 def q16_cem_plan(ensemble, states_q, target_obs_q, explore_shift):
@@ -431,7 +436,7 @@ def q16_cem_plan(ensemble, states_q, target_obs_q, explore_shift):
         states_array[k] = states_q[k]
 
     # Execute optimal trajectory derivation directly on native LLVM array processing
-    best_a_q = _q16_cem_plan_jit(
+    best_traj_q, best_futures_q = _q16_cem_plan_jit(
         states_array,
         target_obs_q,
         np.int64(explore_shift),
@@ -450,7 +455,7 @@ def q16_cem_plan(ensemble, states_q, target_obs_q, explore_shift):
         ALU_Q16.SHIFT,
     )
 
-    return best_a_q
+    return best_traj_q[0], best_futures_q
 
 
 # =====================================================================

@@ -40,3 +40,19 @@
 .read-the-docs {
   color: #888;
 }
+
+/* Ghost Trajectory Styling */
+.cart.ghost {
+  border: 1px dashed rgba(0, 255, 255, 0.4);
+  background-color: transparent !important;
+  box-shadow: none !important;
+  pointer-events: none;
+}
+.cart.ghost .pole {
+  background-color: rgba(0, 255, 255, 0.3);
+  box-shadow: none !important;
+}
+.cart.ghost .cart-body {
+  border: 1px dashed rgba(0, 255, 255, 0.4);
+  background-color: transparent;
+}

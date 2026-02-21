@@ -69,6 +69,23 @@ function App() {
             <h2>Live Physical Kinematics (L0 Syntax)</h2>
             <div className="cartpole-stage">
               <div className="track"></div>
+              {/* Ghost Predictive Futures */}
+              {data && data.futures && data.futures.map((future, idx) => (
+                <div
+                  key={`ghost-${idx}`}
+                  className="cart ghost"
+                  style={{
+                    transform: `translateX(calc(${future.x * 120}px - 50%))`,
+                    opacity: 0.15 + (1 - (idx / data.futures.length)) * 0.25, // Fades further out
+                    zIndex: 5 - idx
+                  }}
+                >
+                  <div className="pole" style={{ transform: `rotate(${future.y}rad)` }}></div>
+                  <div className="cart-body"></div>
+                </div>
+              ))}
+
+              {/* Actual Physical Cart */}
               {data && (
                 <div
                   className="cart"

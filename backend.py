@@ -108,9 +108,16 @@ class LiveCartPoleEngine:
                 active_lr = config.base_lr_shift
                 exp_shift = 1 if self.ensemble.regime_stability < 30 else -2
 
-            a_q = q16_cem_plan(
+            a_q, futures_q = q16_cem_plan(
                 self.ensemble, self.states_q, self.target_obs_q, exp_shift
             )
+
+            # --- HARDWARE SYMMETRY BREAKING ---
+            if ep < 5 and t < 15:
+                noise_f = np.random.uniform(-0.5, 0.5)
+                a_q[0] = ALU_Q16.to_q(np.array(noise_f))
+                # Futures remain whatever the predictive engine guessed,
+                # but the physical action is overwritten by noise.
 
             o_q_next, reward, terminated, truncated, _ = self.env.step(a_q)
 
@@ -132,14 +139,19 @@ class LiveCartPoleEngine:
             pole_angle = float(theta_val)
             cart_pos = float(x_val)
 
+            parsed_futures = []
+            for h in range(config.horizon):
+                # The prediction array matches o_q: [sin(theta), cos(theta), theta, x, x_dot]
+                f_theta = float(ALU_Q16.to_f(futures_q[h, 2]))
+                f_x = float(ALU_Q16.to_f(futures_q[h, 3]))
+                parsed_futures.append({"x": f_x, "y": f_theta})
+
             state_data = {
                 "tick": global_t,
                 "ep": ep,
                 "ep_tick": t,
                 "x": float(cart_pos),
-                "y": float(
-                    pole_angle
-                ),  # We'll map pole angle to Y for the generic UI map
+                "y": float(pole_angle),
                 "surprise": float(np.sqrt(ALU_Q16.to_f(surp_sq_q))),
                 "uncertainty": float(np.sqrt(ALU_Q16.to_f(unc_sq_q))),
                 "regime": self.ensemble.regime_hash,
@@ -150,6 +162,7 @@ class LiveCartPoleEngine:
                 ),
                 "gate_blocked": bool(block),
                 "terminated": bool(terminated or truncated),
+                "futures": parsed_futures,
             }
 
             if t % 50 == 0:
