@@ -151,13 +151,18 @@ def run_cartpole_boreal(max_episodes=150):
 
     global_t = 0
 
-    # --- Curriculum: relax termination for early learning, tighten later ---
-    CURRICULUM_EP = 50  # Episodes with relaxed bounds
-
+    # --- Curriculum: gradually tighten termination bounds ---
     for ep in range(max_episodes):
-        # Curriculum: tighten termination bounds after CURRICULUM_EP episodes
-        if ep == CURRICULUM_EP:
-            print("\n🎓 CURRICULUM: Tightening termination to 12 degrees!")
+        # Gradual curriculum: 45° → 24° → 12°
+        if ep < 30:
+            raw_env.unwrapped.theta_threshold_radians = 45 * 2 * math.pi / 360
+        elif ep < 50:
+            if ep == 30:
+                print("\n🎓 CURRICULUM STAGE 2: Tightening to 24 degrees!")
+            raw_env.unwrapped.theta_threshold_radians = 24 * 2 * math.pi / 360
+        else:
+            if ep == 50:
+                print("\n🎓 CURRICULUM STAGE 3: Tightening to 12 degrees!")
             raw_env.unwrapped.theta_threshold_radians = 12 * 2 * math.pi / 360
 
         o_q, _ = env.reset()
@@ -204,19 +209,11 @@ def run_cartpole_boreal(max_episodes=150):
                 K_p * sin_theta_q + K_d * theta_dot_q + K_x * x_q + K_xd * x_dot_q
             )
 
-            # Blend: early episodes rely heavily on PD, later episodes trust CEM more
-            if ep < 30:
-                # 90% PD, 10% CEM — let predictive model learn before trusting it
-                a_q[0] = (9 * pd_action_q + a_q[0]) // 10
-            elif ep < 60:
-                # 70% PD, 30% CEM
-                a_q[0] = (7 * pd_action_q + 3 * a_q[0]) // 10
-            elif ep < 100:
-                # 50% PD, 50% CEM
-                a_q[0] = (pd_action_q + a_q[0]) >> 1
-            else:
-                # 30% PD, 70% CEM — trust the learned model
-                a_q[0] = (3 * pd_action_q + 7 * a_q[0]) // 10
+            # Blend: PD dominates, CEM provides learned exploration nudge
+            # Under tight 12° bounds, CEM interference causes oscillation failure.
+            # The PD controller is the primary control authority; CEM contributes
+            # a learned nudge (10%) that improves as the predictive model trains.
+            a_q[0] = (9 * pd_action_q + a_q[0]) // 10
 
             # --- HARDWARE SYMMETRY BREAKING ---
             # Only in the very first episodes to kick-start learning
@@ -232,6 +229,7 @@ def run_cartpole_boreal(max_episodes=150):
             states1_q, states2_q, surp_sq_q, unc_sq_q = ensemble.step(
                 states1_q, states2_q, a_q, o_q_next, active_lr
             )
+            o_q = o_q_next  # CRITICAL: update observation for next PD tick
             block, flags = gate.evaluate(surp_sq_q, a_q)
 
             if block and not recovery_mode and t > 50:
