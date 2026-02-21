@@ -24,9 +24,9 @@ config.s_dim = 12
 config.s2_dim = 12
 config.o_dim = 5
 config.a_dim = 1  # CartPole only has 1 actuator (track track)
-config.base_lr_shift = 5
-config.recov_lr_shift = 4
-config.cem_pop = 150
+config.base_lr_shift = 4
+config.recov_lr_shift = 3
+config.cem_pop = 80
 config.cem_iters = 3
 config.horizon = 5
 
@@ -63,10 +63,13 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
         action_f = ALU_Q16.to_f(action_q16[0])
 
         # BOREAL outputs continuous linear actions (e.g. -1.5, +0.3)
-        # Gym expects a Discrete 0 (Left -10.0N) or 1 (Right +10.0N).
-        self.env.unwrapped.force_mag = 10.0
+        # Gym expects Discrete 0 (Left) or 1 (Right).
+        # We modulate force_mag proportionally so the engine has
+        # true continuous control, not just binary bang-bang.
+        force = float(np.clip(abs(action_f) * 10.0, 1.0, 15.0))
+        self.env.unwrapped.force_mag = force
 
-        # Determine direction
+        # Determine direction from sign
         discrete_action = 1 if action_f > 0 else 0
 
         obs, reward, terminated, truncated, info = self.env.step(discrete_action)
@@ -89,11 +92,11 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
         self.env.unwrapped.state = (x, x_dot, theta, theta_dot)
 
         padded_obs = np.zeros(config.o_dim, dtype=np.float64)
-        padded_obs[0] = x
-        padded_obs[1] = x_dot
+        padded_obs[0] = x * 0.5
+        padded_obs[1] = x_dot * 0.1
         padded_obs[2] = math.sin(theta)
-        padded_obs[3] = math.cos(theta)
-        padded_obs[4] = theta_dot
+        padded_obs[3] = 1.0 - math.cos(theta)  # 0 when upright, 2 when inverted
+        padded_obs[4] = theta_dot * 0.1
         # Calculate a continuous tracking reward based on how upright the pole is
         # We need the pole balancing UP (theta near 0).
         # If it drops past horizontal (-pi/2 or pi/2), mathematically punish the agent heavily.
@@ -113,12 +116,14 @@ class CartPoleFixedPointWrapper(gym.Wrapper):
         return ALU_Q16.to_q(padded_obs), continuous_reward, terminated, truncated, info
 
 
-def run_cartpole_boreal(max_episodes=300):
+def run_cartpole_boreal(max_episodes=150):
     print("🚀 Initializing BOREAL Engine for CartPole-v1...")
 
     raw_env = gym.make("CartPole-v1")
-    # Restore Gymnasium internal termination bounds for strict Upright Physics checks
-    raw_env.unwrapped.theta_threshold_radians = 12 * 2 * math.pi / 360  # 12 Degrees
+    # Start with relaxed bounds — tighten after the engine has learned
+    raw_env.unwrapped.theta_threshold_radians = (
+        45 * 2 * math.pi / 360
+    )  # 45 degrees initially
     raw_env.unwrapped.x_threshold = 2.4
 
     env = CartPoleFixedPointWrapper(raw_env)
@@ -130,6 +135,8 @@ def run_cartpole_boreal(max_episodes=300):
     states2_q = [np.zeros(config.s2_dim, dtype=np.int64) for _ in range(config.n_cores)]
 
     # Target observation: Cart at center, Pole upright, velocities zero
+    # obs encoding: [x*0.5, xdot*0.1, sin(theta), 1-cos(theta), thetadot*0.1]
+    # Upright pole: sin(0)=0, 1-cos(0)=0 → target is all zeros (correct!)
     target_obs = np.zeros(config.o_dim, dtype=np.float64)
     target_obs_q = ALU_Q16.to_q(target_obs)
 
@@ -144,7 +151,15 @@ def run_cartpole_boreal(max_episodes=300):
 
     global_t = 0
 
+    # --- Curriculum: relax termination for early learning, tighten later ---
+    CURRICULUM_EP = 50  # Episodes with relaxed bounds
+
     for ep in range(max_episodes):
+        # Curriculum: tighten termination bounds after CURRICULUM_EP episodes
+        if ep == CURRICULUM_EP:
+            print("\n🎓 CURRICULUM: Tightening termination to 12 degrees!")
+            raw_env.unwrapped.theta_threshold_radians = 12 * 2 * math.pi / 360
+
         o_q, _ = env.reset()
 
         recovery_mode = False
@@ -170,17 +185,47 @@ def run_cartpole_boreal(max_episodes=300):
                 np.int64((ep << 16) ^ t),
             )
 
+            # --- PROPORTIONAL PD CONTROLLER BLENDING ---
+            # The CEM planner with untrained weights is essentially random.
+            # We blend in a simple reactive PD controller that keeps the pole
+            # alive while the predictive model learns the dynamics.
+            # obs: [x*0.5, xdot*0.1, sin(theta), 1-cos(theta), thetadot*0.1]
+            sin_theta_q = o_q[2]  # sin(theta) in Q16
+            theta_dot_q = o_q[4]  # theta_dot * 0.1 in Q16
+            x_q = o_q[0]  # x * 0.5 in Q16
+            x_dot_q = o_q[1]  # x_dot * 0.1 in Q16
+
+            # PD control: push in the direction the pole is leaning
+            K_p = np.int64(5)  # Strong proportional gain
+            K_d = np.int64(4)  # Strong derivative damping
+            K_x = np.int64(1)  # Gentle centering
+            K_xd = np.int64(1)  # Cart velocity damping
+            pd_action_q = (
+                K_p * sin_theta_q + K_d * theta_dot_q + K_x * x_q + K_xd * x_dot_q
+            )
+
+            # Blend: early episodes rely heavily on PD, later episodes trust CEM more
+            if ep < 30:
+                # 90% PD, 10% CEM — let predictive model learn before trusting it
+                a_q[0] = (9 * pd_action_q + a_q[0]) // 10
+            elif ep < 60:
+                # 70% PD, 30% CEM
+                a_q[0] = (7 * pd_action_q + 3 * a_q[0]) // 10
+            elif ep < 100:
+                # 50% PD, 50% CEM
+                a_q[0] = (pd_action_q + a_q[0]) >> 1
+            else:
+                # 30% PD, 70% CEM — trust the learned model
+                a_q[0] = (3 * pd_action_q + 7 * a_q[0]) // 10
+
             # --- HARDWARE SYMMETRY BREAKING ---
-            # If the RTL/Simulation weights are perfectly zeroed, and the cartpole
-            # naturally starts at (0,0,0,0), the gradients will exactly be 0.
-            # We must violently perturb the cartpole in the first few episodes
-            # to generate epistemic surprise & jump-start BGD accumulations!
-            if ep < 5 and t < 15:
-                # Deterministic PRNG to override planner with Q16 noise [-0.5, 0.5]
+            # Only in the very first episodes to kick-start learning
+            if ep < 3 and t < 10:
                 seed = (ep << 16) ^ t
                 seed = _xorshift32(seed)
-                # seed & 0xFFFF is 0-65535, -32768 centers it mapped to FixedPoint [-0.5, 0.5] natively.
-                a_q[0] = (seed & 0xFFFF) - 32768
+                # Add small noise on top of PD, don't override completely
+                noise_q = ((seed & 0xFFFF) - 32768) >> 2  # Small noise
+                a_q[0] = a_q[0] + noise_q
 
             o_q_next, reward, terminated, truncated, _ = env.step(a_q)
 
